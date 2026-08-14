@@ -1,0 +1,9 @@
+{
+  "name": "varanda-fidelidade-backend",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Backend do sistema de fidelidade do Varanda Restaurante. Faz a ponte entre o painel e a API do WhatsApp, mantendo as chaves fora do navegador.",
+  "engines": {
+    "node": ">=18"
+  }
+}
