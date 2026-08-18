@@ -122,10 +122,28 @@ async function supabase(caminho, opcoes) {
 module.exports = async function handler(req, res) {
   if (req.method !== 'POST') return responder(res, 405, { erro: 'Use POST.' });
 
-  if (!process.env.APP_TOKEN) {
-    return responder(res, 500, { erro: 'APP_TOKEN não configurado no servidor.' });
+  // ---- Autenticação -------------------------------------------------------
+  // Este endpoint aceita DOIS tokens, e isso é de propósito:
+  //
+  //   IMPORT_TOKEN  -> token estreito, só serve para importar pedidos.
+  //                    É ele que fica no localStorage do nomosmenu.com.br.
+  //                    Se vazar, o pior que acontece é alguém gravar pedidos.
+  //   APP_TOKEN     -> token do painel, abre também o /api/enviar (manda
+  //                    WhatsApp em nome do Varanda). Aceito aqui só por
+  //                    conveniência de teste. NUNCA deve ir para o navegador
+  //                    de um site de terceiro.
+  //
+  // A separação existe porque o token que vive num site que não é nosso tem
+  // que ser o de menor poder possível.
+  const recebido = req.headers['x-varanda-token'];
+  const aceitos = [process.env.IMPORT_TOKEN, process.env.APP_TOKEN].filter(Boolean);
+
+  if (aceitos.length === 0) {
+    return responder(res, 500, {
+      erro: 'Nem IMPORT_TOKEN nem APP_TOKEN configurados no servidor.',
+    });
   }
-  if (req.headers['x-varanda-token'] !== process.env.APP_TOKEN) {
+  if (!recebido || !aceitos.includes(recebido)) {
     return responder(res, 401, { erro: 'Token inválido.' });
   }
   if (!supabaseConfigurado()) {
