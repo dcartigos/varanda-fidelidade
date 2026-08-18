@@ -30,6 +30,35 @@
 const { normalizarTelefone } = require('./_lib/telefone');
 const { supabaseConfigurado } = require('./_lib/supabase');
 
+// ---------------------------------------------------------------------------
+// CORS — por que isto existe
+// ---------------------------------------------------------------------------
+// O coletor roda DENTRO da página do Nomos (nomosmenu.com.br) e chama este
+// endpoint, que está em varanda-backend.vercel.app. São origens diferentes, e
+// o navegador bloqueia isso por padrão. Sem estes cabeçalhos o coletor recebe
+// "Failed to fetch" e nunca chega a mandar nada.
+//
+// A lista é FECHADA de propósito. Não uso '*': se qualquer site pudesse chamar
+// este endpoint, uma página maliciosa aberta no navegador do Lucas poderia
+// gravar pedidos falsos usando o token guardado. Só as origens abaixo passam.
+const ORIGENS_PERMITIDAS = [
+  'https://www.nomosmenu.com.br',
+  'https://nomosmenu.com.br',
+  'https://varanda-backend.vercel.app',
+  'https://dcartigos.github.io',
+];
+
+function aplicarCors(req, res) {
+  const origem = req.headers.origin;
+  if (origem && ORIGENS_PERMITIDAS.includes(origem)) {
+    res.setHeader('Access-Control-Allow-Origin', origem);
+  }
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-varanda-token');
+  res.setHeader('Access-Control-Max-Age', '86400');
+}
+
 function responder(res, status, corpo) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.status(status).send(JSON.stringify(corpo));
@@ -120,6 +149,15 @@ async function supabase(caminho, opcoes) {
 }
 
 module.exports = async function handler(req, res) {
+  aplicarCors(req, res);
+
+  // Antes do POST real, o navegador manda um OPTIONS ("preflight") perguntando
+  // se pode. Se responder 405 aqui, o POST nunca acontece.
+  if (req.method === 'OPTIONS') {
+    res.status(204).end();
+    return;
+  }
+
   if (req.method !== 'POST') return responder(res, 405, { erro: 'Use POST.' });
 
   // ---- Autenticação -------------------------------------------------------
