@@ -1,0 +1,6 @@
+{
+  "crons": [
+    { "path": "/api/rotina-diaria", "schedule": "30 17 * * *" }
+  ]
+}
+
