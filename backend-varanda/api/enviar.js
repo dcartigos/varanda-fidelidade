@@ -126,6 +126,31 @@ module.exports = async function handler(req, res) {
     });
   }
 
+  // ---- TRAVA DOS 13 DÍGITOS — adicionada em 20/08/2026 ---------------------
+  // Celular brasileiro em E.164 tem exatamente 13 dígitos: 55 + DDD + 9 + 8.
+  //
+  // POR QUE ISTO EXISTE NO BACKEND E NÃO NA ROTINA:
+  // Em 20/08 o relatório de fechamento "saiu" para +554499691829 — 12 dígitos,
+  // sem o nono. A Meta ACEITOU, respondeu `sent`, e nunca entregou. Não gerou
+  // erro nenhum: nem 131026, nem 131047. Ficou parado num estado que parece
+  // sucesso, e ninguém percebeu até o Lucas perguntar por que não recebeu.
+  //
+  // Uma trava escrita na conversa ou no prompt da tarefa agendada falharia no
+  // dia em que alguém reescrevesse o prompt. Aqui, nenhuma rotina consegue
+  // furar — e o erro aparece na hora, com o motivo escrito.
+  const digitosE164 = tel.e164.replace(/\D/g, '').length;
+  if (digitosE164 !== 13) {
+    return responder(res, 400, {
+      erro: 'Telefone com quantidade de dígitos inválida.',
+      motivo: 'E.164 precisa ter 13 dígitos (55 + DDD + 9 + 8 dígitos). Este tem ' +
+        digitosE164 + '.',
+      recebido: telefone,
+      normalizado: tel.e164,
+      explicacao: 'A Meta aceita número malformado, responde "sent" e nunca entrega. ' +
+        'Recusar aqui é a única forma de perceber o problema.',
+    });
+  }
+
   // ---- Idempotência -------------------------------------------------------
   // Sem isso, uma execução repetida da rotina manda a mesma mensagem duas vezes
   // para o mesmo cliente. Foi a falha #5 apontada pela auditoria.
