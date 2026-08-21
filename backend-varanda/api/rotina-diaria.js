@@ -160,7 +160,7 @@ module.exports = async function handler(req, res) {
   let semSaldo = [];
   if (telefones.length) {
     const q = await sb('/base_clientes?select=telefone_e164,saldo_pontos,sem_whatsapp' +
-      '&telefone_e164=in.(' + telefones.map((t) => '"' + t + '"').join(',') + ')');
+      '&telefone_e164=in.(' + telefones.map((t) => '"' + encodeURIComponent(t) + '"').join(',') + ')');
     for (const c of (q.ok && Array.isArray(q.corpo) ? q.corpo : [])) {
       if (c.sem_whatsapp) continue;
       if (c.saldo_pontos === null || c.saldo_pontos === undefined) { semSaldo.push(c.telefone_e164); continue; }
