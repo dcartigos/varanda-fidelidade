@@ -18,8 +18,13 @@
 //
 // Parâmetro obrigatório: dia=YYYY-MM-DD
 // Parâmetro opcional: seco=1 (só simula — mostra quem receberia o quê, não manda nada)
+//
+// 22/08/2026 — assim como rotina-diaria.js, este arquivo NÃO chama mais
+// /api/enviar por HTTP. Chama enviarMensagem() de api/_lib/envio.js direto,
+// em memória. Ver o comentário equivalente em rotina-diaria.js para o porquê.
 
 const { supabaseConfigurado } = require('./_lib/supabase');
+const { enviarMensagem } = require('./_lib/envio');
 
 function responder(res, status, corpo) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -39,18 +44,6 @@ async function sb(caminho, opcoes) {
   }, opcoes || {}));
   const txt = await r.text();
   return { ok: r.ok, status: r.status, corpo: txt ? JSON.parse(txt) : null };
-}
-
-/** Chama o nosso próprio /api/enviar. O token vem do ambiente, não do cliente. */
-async function enviar(payload) {
-  const base = process.env.VERCEL_URL ? 'https://' + process.env.VERCEL_URL : '';
-  const r = await fetch(base + '/api/enviar', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-varanda-token': process.env.APP_TOKEN },
-    body: JSON.stringify(payload),
-  });
-  const corpo = await r.json().catch(() => ({}));
-  return { status: r.status, aceito: !!corpo.aceito, erro: corpo.erro || corpo.motivo || null };
 }
 
 module.exports = async function handler(req, res) {
@@ -86,7 +79,6 @@ module.exports = async function handler(req, res) {
   );
   const pedidosDoDia = (doDia.ok && Array.isArray(doDia.corpo)) ? doDia.corpo : [];
 
-  // último pedido de cada telefone, só 13 dígitos
   const ultimoPedido = {};
   for (const p of pedidosDoDia) {
     const dig = String(p.telefone_e164 || '').replace(/\D/g, '');
@@ -130,7 +122,7 @@ module.exports = async function handler(req, res) {
     const dataBR = String(data.getUTCDate()).padStart(2, '0') + '/' +
       String(data.getUTCMonth() + 1).padStart(2, '0') + '/' + data.getUTCFullYear();
     if (seco) { resultado.detalhe.push(tel + ' -> ' + saldos[tel] + ' pts (simulado)'); continue; }
-    const r = await enviar({
+    const r = await enviarMensagem({
       telefone: tel,
       template: 'atualizacao_cadastro_pontos',
       idioma: 'pt_BR',
@@ -139,7 +131,7 @@ module.exports = async function handler(req, res) {
       forcar: true,
     });
     if (r.aceito) resultado.enviados++;
-    else { resultado.recusados++; resultado.detalhe.push(tel + ': ' + r.erro); }
+    else { resultado.recusados++; resultado.detalhe.push(tel + ': ' + (r.erro || r.motivo || 'falha desconhecida')); }
     await new Promise((x) => setTimeout(x, 300));
   }
 
@@ -149,4 +141,3 @@ module.exports = async function handler(req, res) {
 
   return responder(res, 200, resultado);
 };
-
