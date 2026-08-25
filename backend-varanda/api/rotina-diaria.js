@@ -11,18 +11,18 @@
 // localStorage do navegador de UM computador. Isso quebrou de quatro formas
 // diferentes em dois dias:
 //
-// 1. o token nunca foi colado no PC do Varanda -> 20/08, nada saiu
-// 2. o token foi rotacionado e o valor se perdeu -> era Sensitive no Vercel
-// 3. o navegador do PC estava com localStorage vazio
-// 4. o classificador de segurança do assistente bloqueou ler o token
+//   1. o token nunca foi colado no PC do Varanda   -> 20/08, nada saiu
+//   2. o token foi rotacionado e o valor se perdeu -> era Sensitive no Vercel
+//   3. o navegador do PC estava com localStorage vazio
+//   4. o classificador de segurança do assistente bloqueou ler o token
 //
 // Nenhuma dessas é um bug de código. Todas são consequência da MESMA decisão de
 // arquitetura errada: **pedir para o cliente guardar um segredo**.
 //
 // A correção é inverter os papéis:
 //
-// ANTES: o PC lê o Nomos, monta a mensagem e ENVIA (precisa do token)
-// AGORA: o PC lê o Nomos e só GRAVA os números. O SERVIDOR envia.
+//   ANTES:  o PC lê o Nomos, monta a mensagem e ENVIA (precisa do token)
+//   AGORA:  o PC lê o Nomos e só GRAVA os números.  O SERVIDOR envia.
 //
 // O APP_TOKEN nunca sai daqui. Ninguém copia, ninguém cola, ninguém perde.
 //
@@ -47,29 +47,17 @@
 //
 // Antes: uma falha no PC = ninguém recebe nada.
 // Agora: uma falha no PC = todos recebem 80% do relatório, e sabem o que faltou.
-//
-// ============================================================================
-// 22/08/2026 — fim do fetch interno para /api/enviar
-// ============================================================================
-//
-// Antes, esta função chamava o próprio /api/enviar por HTTP (self-fetch com
-// process.env.APP_TOKEN no cabeçalho). Essa chamada quebrou em 21/08 ("Token
-// inválido") sem que o teste seco=1 detectasse, porque seco=1 nunca chega a
-// executar essa parte. Agora a lógica de envio vive em api/_lib/envio.js e é
-// chamada direto, em memória — sem HTTP, sem token entre as duas partes do
-// nosso próprio servidor.
 
 const { supabaseConfigurado } = require('./_lib/supabase');
-const { enviarMensagem } = require('./_lib/envio');
 
 const EQUIPE = [
-  { nome: 'Lucas', telefone: '+5544999691829', completo: true },
+  { nome: 'Lucas',    telefone: '+5544999691829', completo: true },
   { nome: 'Leopoldo', telefone: '+5524999410719', completo: true },
-  { nome: 'Maria', telefone: '+5544997335705', completo: false }, // só clientes
+  { nome: 'Maria',    telefone: '+5544997335705', completo: false }, // só clientes
 ];
 
 const DIAS = ['domingo', 'segunda-feira', 'terça-feira', 'quarta-feira',
-  'quinta-feira', 'sexta-feira', 'sábado'];
+              'quinta-feira', 'sexta-feira', 'sábado'];
 
 function responder(res, status, corpo) {
   res.setHeader('Content-Type', 'application/json; charset=utf-8');
@@ -94,11 +82,39 @@ async function sb(caminho, opcoes) {
   return { ok: r.ok, status: r.status, corpo: txt ? JSON.parse(txt) : null };
 }
 
+/** Chama o nosso próprio /api/enviar. O token vem do ambiente, não do cliente. */
+async function enviar(payload) {
+  const base = process.env.VERCEL_URL ? 'https://' + process.env.VERCEL_URL : '';
+  const r = await fetch(base + '/api/enviar', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      // .trim() de propósito: espaço invisível na variável de ambiente gerou
+      // 401 por três dias, inclusive em chamada do servidor para si mesmo.
+      'x-varanda-token': String(process.env.APP_TOKEN || '').trim(),
+    },
+    body: JSON.stringify(payload),
+  });
+  const corpo = await r.json().catch(() => ({}));
+  return { status: r.status, aceito: !!corpo.aceito, erro: corpo.erro || corpo.motivo || null };
+}
+
 module.exports = async function handler(req, res) {
+  // Autenticação em três caminhos, do mais automático para o mais manual:
+  //
+  //  1. Vercel Cron  -> manda o header 'x-vercel-cron'. Não precisa de token.
+  //     É assim que roda todo dia. Ninguém digita nada.
+  //
+  //  2. TESTE_TOKEN  -> uma senha simples que o Lucas inventa e guarda, só para
+  //     poder abrir a URL no navegador e conferir. Existe porque o APP_TOKEN é
+  //     Sensitive no Vercel: nem o dono consegue ler o valor de volta, e ficar
+  //     rotacionando segredo para poder testar foi o que travou 21/08.
+  //
+  //  3. APP_TOKEN / IMPORT_TOKEN -> continuam valendo, para quem tiver o valor.
   const doCron = !!req.headers['x-vercel-cron'];
-  const recebido = (req.query && req.query.token) || req.headers['x-varanda-token'];
+  const recebido = String((req.query && req.query.token) || req.headers['x-varanda-token'] || '').trim();
   const aceitos = [process.env.TESTE_TOKEN, process.env.IMPORT_TOKEN, process.env.APP_TOKEN]
-    .filter(Boolean);
+    .filter(Boolean).map((t) => String(t).trim());
   if (!doCron && (!recebido || !aceitos.includes(recebido))) {
     return responder(res, 401, {
       erro: 'Token inválido.',
@@ -121,6 +137,62 @@ module.exports = async function handler(req, res) {
 
   const resultado = { dia: hoje, seco, pontos: {}, fechamento: {} };
 
+  // =========================================================================
+  // TRAVA DO CONTRATO DE COLETA — adicionada em 24/08/2026
+  // =========================================================================
+  //
+  // POR QUE ESTA TRAVA EXISTE
+  // Em 22/08 este relatório saiu para o Lucas, o Leopoldo e a Maria com TUDO
+  // ZERADO: R$ 0,00, 0 pedidos, 0 novos cadastros. Não foi erro de cálculo — o
+  // Coletor não havia rodado, o banco estava vazio, e o código somou zero com
+  // zero e mandou. Parecia um dia sem movimento.
+  //
+  // O defeito de fundo: não havia como distinguir "o dia foi fraco" de
+  // "ninguém coletou os dados". No banco as duas coisas são idênticas.
+  //
+  // `coleta_confiavel()` é essa distinção: só devolve true se o Coletor
+  // declarou a coleta completa E havia pedidos do dia.
+  //
+  // REGRA: ausência de dado não é zero.
+  const conf = await sb('/rpc/coleta_confiavel', {
+    method: 'POST', body: JSON.stringify({ p_dia: hoje }),
+  });
+  const coletaOk = conf.ok && (conf.corpo === true || conf.corpo === 'true');
+
+  resultado.coleta_confiavel = coletaOk;
+
+  if (!coletaOk) {
+    resultado.bloqueado = true;
+    resultado.motivo =
+      'O Coletor não declarou a coleta de hoje como completa. Nada foi enviado. ' +
+      'Enviar agora significaria mandar número possivelmente zerado para os ' +
+      'gestores e saldo possivelmente errado para os clientes.';
+    resultado.o_que_fazer =
+      'Conferir no PC do Varanda se o Coletor das 14h15 rodou. Depois de ele ' +
+      'concluir, chamar esta URL de novo — a idempotência impede duplicidade.';
+
+    // Registra a recusa: recusa silenciosa seria o mesmo defeito de antes.
+    await sb('/execucoes_log', {
+      method: 'POST',
+      body: JSON.stringify({
+        rotina: 'rotina-diaria',
+        sucesso: false,
+        terminado_em: new Date().toISOString(),
+        mensagem: 'bloqueado: coleta_confiavel() = false',
+      }),
+    });
+
+    return responder(res, 200, resultado);
+  }
+
+  // =========================================================================
+  // PARTE 1 — PONTOS para quem veio hoje
+  // =========================================================================
+  //
+  // Depende de base_clientes.saldo_pontos, que o PC do Varanda grava ao ler o
+  // relatório de fidelidade do Nomos. Sem isso, esta parte é pulada com aviso —
+  // NUNCA inventar saldo.
+
   const doDia = await sb(
     '/nomos_pedidos?select=codigo,telefone_e164,data_hora_pedido' +
     '&data_hora_pedido=gte.' + encodeURIComponent(hoje + 'T00:00:00-03:00') +
@@ -128,6 +200,7 @@ module.exports = async function handler(req, res) {
   );
   const pedidosHoje = (doDia.ok && Array.isArray(doDia.corpo)) ? doDia.corpo : [];
 
+  // último pedido de cada telefone, só 13 dígitos
   const ultimoPedido = {};
   for (const p of pedidosHoje) {
     const dig = String(p.telefone_e164 || '').replace(/\D/g, '');
@@ -140,7 +213,7 @@ module.exports = async function handler(req, res) {
   let semSaldo = [];
   if (telefones.length) {
     const q = await sb('/base_clientes?select=telefone_e164,saldo_pontos,sem_whatsapp' +
-      '&telefone_e164=in.(' + telefones.map((t) => '"' + encodeURIComponent(t) + '"').join(',') + ')');
+      '&telefone_e164=in.(' + telefones.map((t) => '"' + t + '"').join(',') + ')');
     for (const c of (q.ok && Array.isArray(q.corpo) ? q.corpo : [])) {
       if (c.sem_whatsapp) continue;
       if (c.saldo_pontos === null || c.saldo_pontos === undefined) { semSaldo.push(c.telefone_e164); continue; }
@@ -166,9 +239,9 @@ module.exports = async function handler(req, res) {
     const p = ultimoPedido[tel];
     const data = new Date(p.data_hora_pedido);
     const dataBR = String(data.getUTCDate()).padStart(2, '0') + '/' +
-      String(data.getUTCMonth() + 1).padStart(2, '0') + '/' + data.getUTCFullYear();
+                   String(data.getUTCMonth() + 1).padStart(2, '0') + '/' + data.getUTCFullYear();
     if (seco) { resultado.pontos.detalhe.push(tel + ' (simulado)'); continue; }
-    const r = await enviarMensagem({
+    const r = await enviar({
       telefone: tel,
       template: 'atualizacao_cadastro_pontos',
       idioma: 'pt_BR',
@@ -177,9 +250,13 @@ module.exports = async function handler(req, res) {
       forcar: true,
     });
     if (r.aceito) resultado.pontos.enviados++;
-    else { resultado.pontos.recusados++; resultado.pontos.detalhe.push(tel + ': ' + (r.erro || r.motivo || 'falha desconhecida')); }
+    else { resultado.pontos.recusados++; resultado.pontos.detalhe.push(tel + ': ' + r.erro); }
     await new Promise((x) => setTimeout(x, 300));
   }
+
+  // =========================================================================
+  // PARTE 2 — FECHAMENTO do caixa
+  // =========================================================================
 
   const num = await sb('/rpc/numeros_do_dia', {
     method: 'POST', body: JSON.stringify({ p_dia: hoje }),
@@ -194,15 +271,16 @@ module.exports = async function handler(req, res) {
     return responder(res, 200, resultado);
   }
 
+  // kg e buffet livre: só existem se o PC gravou. Nunca inventar.
   const buf = await sb('/buffet_dia?select=kg,valor_kg,livre_qtd,livre_valor&dia=eq.' + hoje);
   const b = (buf.ok && Array.isArray(buf.corpo) && buf.corpo[0]) ? buf.corpo[0] : null;
 
   const NC = '(não confirmado)';
   const linhaKg = b && b.kg
-    ? dinheiro(b.kg) + ' kg (R$ ' + dinheiro(b.valor_kg) + ')'
+    ? dinheiro(b.kg) + ' kg  (R$ ' + dinheiro(b.valor_kg) + ')'
     : NC;
   const linhaLivre = b && b.livre_qtd
-    ? b.livre_qtd + ' pessoas (R$ ' + dinheiro(b.livre_valor) + ')'
+    ? b.livre_qtd + ' pessoas  (R$ ' + dinheiro(b.livre_valor) + ')'
     : NC;
 
   const pedidos = Number(n.pedidos || 0);
@@ -214,15 +292,15 @@ module.exports = async function handler(req, res) {
     '*CLIENTES — ' + pedidos + ' pedidos*\n\n' +
     '• novos cadastros: ' + novos + '\n' +
     '• voltaram: ' + Math.max(0, ident - novos) + '\n' +
-    '• identificados: ' + ident + ' (' + pct(ident) + '%)\n' +
-    '• não cadastrados: ' + (pedidos - ident) + ' (' + pct(pedidos - ident) + '%)';
+    '• identificados: ' + ident + '  (' + pct(ident) + '%)\n' +
+    '• não cadastrados: ' + (pedidos - ident) + '  (' + pct(pedidos - ident) + '%)';
 
   const completo =
     '*VARANDA — ' + hojeBR + ' (' + diaSemana + ')*\n\n' +
     '*FATURAMENTO TOTAL: R$ ' + dinheiro(n.total) + '*\n\n' +
-    '• salão: R$ ' + dinheiro(n.salao) + ' (' + (n.salao_qtd || 0) + ' pedidos)\n' +
-    '• delivery: R$ ' + dinheiro(n.delivery) + ' (' + (n.delivery_qtd || 0) + ' pedidos)\n' +
-    '• balcão: R$ ' + dinheiro(n.balcao) + ' (' + (n.balcao_qtd || 0) + ' pedidos)\n\n' +
+    '• salão: R$ ' + dinheiro(n.salao) + '  (' + (n.salao_qtd || 0) + ' pedidos)\n' +
+    '• delivery: R$ ' + dinheiro(n.delivery) + '  (' + (n.delivery_qtd || 0) + ' pedidos)\n' +
+    '• balcão: R$ ' + dinheiro(n.balcao) + '  (' + (n.balcao_qtd || 0) + ' pedidos)\n\n' +
     '=========================\n\n' +
     '*QUANTIDADE*\n\n' +
     '• buffet por kg: ' + linhaKg + '\n' +
@@ -245,18 +323,20 @@ module.exports = async function handler(req, res) {
       const texto = p.completo ? completo :
         '*VARANDA — ' + hojeBR + '*\n\n' + blocoClientes +
         '\n\n_Responda OK para manter o envio gratuito._';
-      const r = await enviarMensagem({
+      const r = await enviar({
         telefone: p.telefone,
         texto,
         chave: 'fechamento|' + p.telefone + '|' + hoje,
         forcar: true,
       });
       if (r.aceito) resultado.fechamento.enviados++;
-      else { resultado.fechamento.falharam++; resultado.fechamento.detalhe.push(p.nome + ': ' + (r.erro || r.motivo || 'falha desconhecida')); }
+      else { resultado.fechamento.falharam++; resultado.fechamento.detalhe.push(p.nome + ': ' + r.erro); }
       await new Promise((x) => setTimeout(x, 400));
     }
   }
 
+  // ⚠️ 'enviados' aqui significa ACEITO PELA META, não entregue.
+  // A verdade sobre entrega vem do webhook. Ver /api/status.
   resultado.aviso =
     'Os números de "enviados" são ACEITOS na fila da Meta. Entrega real só pelo ' +
     'webhook — consulte /api/status?minutos=15.';
