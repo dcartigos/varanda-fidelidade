@@ -369,4 +369,16 @@ module.exports = async function handler(req, res) {
         forcar: true,
       });
       if (r.aceito) resultado.fechamento.enviados++;
-      else { resultado.fechamento.falhar
+      else { resultado.fechamento.falharam++; resultado.fechamento.detalhe.push(p.nome + ': ' + r.erro); }
+      await new Promise((x) => setTimeout(x, 400));
+    }
+  }
+
+  // ⚠️ 'enviados' aqui significa ACEITO PELA META, não entregue.
+  // A verdade sobre entrega vem do webhook. Ver /api/status.
+  resultado.aviso =
+    'Os números de "enviados" são ACEITOS na fila da Meta. Entrega real só pelo ' +
+    'webhook — consulte /api/status?minutos=15.';
+
+  return responder(res, 200, resultado);
+};
