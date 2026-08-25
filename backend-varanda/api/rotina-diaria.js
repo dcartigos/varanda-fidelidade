@@ -65,6 +65,36 @@ function responder(res, status, corpo) {
   res.status(status).send(JSON.stringify(corpo, null, 1));
 }
 
+// ---------------------------------------------------------------------------
+// CORS — adicionado em 25/08/2026.
+//
+// Esta rotina nasceu para ser chamada pelo cron da Vercel, que não é navegador
+// e não precisa de CORS. Mas o Coletor (PC do Varanda) chama a partir da página
+// do Nomos para a conferência com &seco=1 — e sem estes cabeçalhos o navegador
+// bloqueia a LEITURA da resposta e mostra "Failed to fetch", igualzinho a
+// servidor fora do ar. Foi exatamente o que travou o passo 7 em 25/08.
+//
+// Regra do projeto a partir de hoje: todo endpoint que o navegador chama usa
+// este mesmo bloco, e o teste pós-deploy inclui uma chamada da origem real.
+// ---------------------------------------------------------------------------
+const ORIGENS_PERMITIDAS = [
+  'https://www.nomosmenu.com.br',
+  'https://nomosmenu.com.br',
+  'https://varanda-backend.vercel.app',
+  'https://dcartigos.github.io',
+];
+
+function aplicarCors(req, res) {
+  const origem = req.headers.origin;
+  if (origem && ORIGENS_PERMITIDAS.includes(origem)) {
+    res.setHeader('Access-Control-Allow-Origin', origem);
+  }
+  res.setHeader('Vary', 'Origin');
+  res.setHeader('Access-Control-Allow-Methods', 'GET, OPTIONS');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, x-varanda-token');
+  res.setHeader('Access-Control-Max-Age', '86400');
+}
+
 const dinheiro = (v) =>
   Number(v || 0).toLocaleString('pt-BR', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 
@@ -100,6 +130,9 @@ async function enviar(payload) {
 }
 
 module.exports = async function handler(req, res) {
+  aplicarCors(req, res);
+  if (req.method === 'OPTIONS') { res.status(204).end(); return; }
+
   // Autenticação em três caminhos, do mais automático para o mais manual:
   //
   //  1. Vercel Cron  -> manda o header 'x-vercel-cron'. Não precisa de token.
