@@ -245,8 +245,14 @@ module.exports = async function handler(req, res) {
   let saldos = {};
   let semSaldo = [];
   if (telefones.length) {
+    // ⚠️ BUG CORRIGIDO EM 25/08/2026 — o encodeURIComponent aqui é OBRIGATÓRIO.
+    // Sem ele, o "+" do +5544... vira ESPAÇO na URL e o banco procura " 5544...":
+    // zero encontrados. Resultado: com_saldo=0 E sem_saldo_no_banco=0 ao mesmo
+    // tempo — a assinatura deste bug. A gravação no coleta.js sempre codificou;
+    // só esta leitura não. Escrita certa, leitura errada, 535 saldos invisíveis.
+    const lista = telefones.map((t) => '"' + t + '"').join(',');
     const q = await sb('/base_clientes?select=telefone_e164,saldo_pontos,sem_whatsapp' +
-      '&telefone_e164=in.(' + telefones.map((t) => '"' + t + '"').join(',') + ')');
+      '&telefone_e164=' + encodeURIComponent('in.(' + lista + ')'));
     for (const c of (q.ok && Array.isArray(q.corpo) ? q.corpo : [])) {
       if (c.sem_whatsapp) continue;
       if (c.saldo_pontos === null || c.saldo_pontos === undefined) { semSaldo.push(c.telefone_e164); continue; }
@@ -363,16 +369,4 @@ module.exports = async function handler(req, res) {
         forcar: true,
       });
       if (r.aceito) resultado.fechamento.enviados++;
-      else { resultado.fechamento.falharam++; resultado.fechamento.detalhe.push(p.nome + ': ' + r.erro); }
-      await new Promise((x) => setTimeout(x, 400));
-    }
-  }
-
-  // ⚠️ 'enviados' aqui significa ACEITO PELA META, não entregue.
-  // A verdade sobre entrega vem do webhook. Ver /api/status.
-  resultado.aviso =
-    'Os números de "enviados" são ACEITOS na fila da Meta. Entrega real só pelo ' +
-    'webhook — consulte /api/status?minutos=15.';
-
-  return responder(res, 200, resultado);
-};
+      else { resultado.fechamento.falhar
