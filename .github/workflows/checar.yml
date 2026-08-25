@@ -1,0 +1,52 @@
+# ============================================================================
+# O ROBÔ QUE BARRA ARQUIVO QUEBRADO  (25/08/2026)
+# ============================================================================
+#
+# POR QUE EXISTE: em 25/08 um arquivo subiu CORTADO para o GitHub duas vezes
+# (coleta.js e rotina-diaria.js). Arquivo cortado = erro de sintaxe = o
+# backend inteiro daquela rota devolve 500 e o navegador mostra
+# "Failed to fetch". Levou horas para achar. Este robô roda a cada commit e
+# pega isso em 30 segundos: aparece um X vermelho no commit.
+#
+# ONDE MORA: .github/workflows/checar.yml  (o caminho exato importa)
+#
+# O QUE ELE CONFERE em cada .js do backend:
+#   1. sintaxe válida (node --check) — pega arquivo cortado na hora
+#   2. filtro in.( sem encodeURIComponent — o bug do "+" que virou espaço
+#      e escondeu 535 saldos em 25/08
+# ============================================================================
+
+name: checar backend
+
+on:
+  push:
+    paths:
+      - 'backend-varanda/**'
+
+jobs:
+  checar:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: sintaxe de todos os .js
+        run: |
+          erro=0
+          for f in $(find backend-varanda -name '*.js'); do
+            if node --check "$f" 2>erro.txt; then
+              echo "OK  $f"
+            else
+              echo "QUEBRADO: $f"
+              cat erro.txt
+              erro=1
+            fi
+          done
+          exit $erro
+
+      - name: filtro in.( sem encode (o bug do + que virou espaco)
+        run: |
+          if grep -rn "in\.(" backend-varanda --include='*.js' | grep -v encodeURIComponent | grep -v '^\s*//' ; then
+            echo "ERRO: filtro in.( montado sem encodeURIComponent — o + dos telefones vira espaço na URL."
+            exit 1
+          fi
+          echo "OK — nenhum filtro sem encode."
