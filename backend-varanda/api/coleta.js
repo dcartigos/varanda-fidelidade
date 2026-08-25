@@ -83,9 +83,39 @@ function responder(res, status, corpo) {
 }
 
 const limpar = (v) => String(v == null ? '' : v).trim();
+
+/**
+ * Converte para número aceitando número puro e formato brasileiro.
+ *
+ * ⚠️ BUG CORRIGIDO EM 25/08/2026 — NÃO VOLTE A APAGAR TODOS OS PONTOS.
+ *
+ * A versão anterior fazia `String(v).replace(/\./g,'')` sempre, para entender
+ * "1.598,42". Só que isso destrói número normal: o ponto decimal ia embora e o
+ * valor era multiplicado por 10, 100 ou 1000 — dependendo de quantas casas
+ * decimais tivesse.
+ *
+ *    139.80  -> 1398     (10x)
+ *    19.37   -> 1937     (100x)
+ *    2.372   -> 2372     (1000x)
+ *
+ * Por isso o Coletor via "no kg preciso multiplicar por 10, no buffet livre
+ * dividir por 10": não era campo, era casa decimal. E ele acertou em RECUSAR
+ * compensar o valor à mão em vez de gravar número fabricado no banco
+ * financeiro do restaurante.
+ *
+ * Regra: só trata como formato brasileiro quando existe VÍRGULA. Sem vírgula,
+ * o ponto é decimal e fica onde está.
+ */
 const num = (v) => {
   if (v === null || v === undefined || v === '') return null;
-  const n = Number(String(v).replace(/\./g, '').replace(',', '.'));
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+
+  let s = String(v).trim().replace(/R\$/gi, '').replace(/\s/g, '');
+  if (s.includes(',')) {
+    // "1.598,42" ou "1598,42" -> ponto é separador de milhar
+    s = s.replace(/\./g, '').replace(',', '.');
+  }
+  const n = Number(s);
   return Number.isFinite(n) ? n : null;
 };
 
@@ -347,34 +377,3 @@ module.exports = async function handler(req, res) {
       method: 'POST', body: JSON.stringify({ p_dia: dia }),
     });
     const podeEnviar = v.ok && (v.corpo === true || v.corpo === 'true');
-
-    return responder(res, 200, {
-      ok: true, completa: true, pode_enviar: podeEnviar,
-      proximo_passo: podeEnviar
-        ? 'Chamar /api/rotina-diaria com &seco=1 para conferir, e depois sem o seco=1 para enviar.'
-        : 'coleta_confiavel() deu false. NÃO chame a rotina. Avise o Lucas.',
-      despesas_gravadas: !!s.despesas_gravadas,
-    });
-  }
-
-  // -------------------------------------------------------------- FECHAR LOG
-  if (acao === 'fechar_log') {
-    const id = Number(c.execucao_id);
-    if (!id) return responder(res, 400, { erro: 'execucao_id é obrigatório.' });
-    await sb('/execucoes_log?id=eq.' + id, {
-      method: 'PATCH',
-      body: JSON.stringify({
-        terminado_em: new Date().toISOString(),
-        sucesso: c.sucesso !== false,
-        detalhe: c.detalhe || null,
-        mensagem: limpar(c.mensagem) || null,
-      }),
-    });
-    return responder(res, 200, { ok: true });
-  }
-
-  return responder(res, 400, {
-    erro: 'Ação desconhecida: ' + (acao || '(vazia)'),
-    acoes: ['inicio', 'pedidos', 'pontos', 'buffet', 'despesas', 'ifood', 'concluir', 'fechar_log'],
-  });
-};
