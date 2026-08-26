@@ -40,6 +40,10 @@ const TEMPLATE = 'campanha_imagem';
 const RAW = 'https://raw.githubusercontent.com/dcartigos/varanda-fidelidade/main/artes/';
 const LINK_PEDIDO = 'https://www.nomosmenu.com.br/pedido/varanda/cardapio';
 
+// Telefone do Lucas, para os avisos de falha. Nunca entra na fila de campanha
+// -- a fila_campanha exclui este numero explicitamente.
+const DONO = '+5544999691829';
+
 // ---------------------------------------------------------------------------
 // CATÁLOGO DE ARTES
 // ---------------------------------------------------------------------------
@@ -153,6 +157,34 @@ function hojeISO() {
 }
 
 const dormir = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// A YCloud recusa por falta de saldo com 403 e esta mensagem. Reconhecer isso
+// é o que permite parar o laço em vez de queimar dezenas de chamadas inúteis.
+function semSaldo(resposta) {
+  const txt = JSON.stringify(resposta || '').toLowerCase();
+  return /balance is insufficient|insufficient balance|insufficient_balance/.test(txt);
+}
+
+// Manda um WhatsApp de texto para o Lucas. Usa o _lib/envio.js -- a mesma
+// função que já sustenta o envio de pontos e o relatório de fechamento.
+//
+// Vai com forcar: true de propósito. A trava de horário do envio.js bloqueia
+// antes das 11h, e o aviso mais importante é justamente o das 10h, quando o
+// disparo falha. Aviso operacional para o dono não é marketing: não tem hora.
+async function avisarLucas(texto) {
+  try {
+    const { enviarMensagem } = require('./_lib/envio');
+    const r = await enviarMensagem({
+      telefone: DONO,
+      texto: String(texto).slice(0, 900),
+      forcar: true,
+    });
+    return { ok: Boolean(r && r.aceito), detalhe: r && (r.erro || r.status) };
+  } catch (e) {
+    // Um aviso que falha NUNCA pode derrubar o disparo. Ele é o acessório.
+    return { ok: false, detalhe: String(e && e.message ? e.message : e) };
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Supabase (REST + RPC). Não uso o _lib/supabase.js porque ele só faz insert.
@@ -448,6 +480,7 @@ module.exports = async (req, res) => {
   // qualidade do número na Meta, e a qualidade é o que define o limite diário.
   const enviados = [];
   const falhas = [];
+  let saldoAcabou = false;
 
   for (const pessoa of fila) {
     const tel = normalizarTelefone(pessoa.telefone_e164).e164;
@@ -510,18 +543,56 @@ module.exports = async (req, res) => {
       }),
     });
 
-    if (r.ok) enviados.push(tel);
-    else falhas.push({ telefone: tel, status: r.status, resposta: dados });
+    if (r.ok) {
+      enviados.push(tel);
+    } else {
+      falhas.push({ telefone: tel, status: r.status, resposta: dados });
+
+      // ---- PARA NA HORA SE O SALDO ACABOU --------------------------------
+      // Em 26/08 a carteira da YCloud zerou na 52ª mensagem. O código de então
+      // continuou tentando e queimou mais 50 chamadas garantidamente inúteis,
+      // gravando 51 linhas de erro. Saldo não volta sozinho no meio do laço:
+      // a primeira recusa por saldo já é a resposta final.
+      if (semSaldo(dados)) {
+        saldoAcabou = true;
+        break;
+      }
+    }
 
     await dormir(120);
+  }
+
+  // ---- AVISO AO LUCAS QUANDO ALGO SAI ERRADO -------------------------------
+  // A falha de 26/08 quebrou às 10h01 e ninguém soube até as 11h. Silêncio é o
+  // pior resultado: não dá para distinguir "dia correu bem" de "ninguém rodou".
+  const taxaFalha = fila.length ? falhas.length / fila.length : 0;
+  let avisoEnviado = null;
+
+  if (saldoAcabou || enviados.length === 0 || taxaFalha >= 0.25) {
+    const motivo = saldoAcabou
+      ? 'O SALDO DA YCLOUD ACABOU no meio do disparo.'
+      : enviados.length === 0
+        ? 'O disparo de hoje NAO saiu para ninguem.'
+        : 'O disparo saiu com muita falha.';
+
+    avisoEnviado = await avisarLucas(
+      'VARANDA - disparo ' + hoje + ' ' + agoraSP().toTimeString().slice(0, 5) + '. '
+      + motivo + ' Arte: ' + arteId + '. Enviadas: ' + enviados.length
+      + ' de ' + fila.length + '. Falhas: ' + falhas.length + '.'
+      + (saldoAcabou ? ' Recarregue em ycloud.com/console (Settings > Billing).' : '')
+      + ' Quem nao recebeu continua no topo da fila e sai no proximo disparo.'
+    );
   }
 
   return res.status(200).json({
     ...resumo,
     enviados: enviados.length,
     falhas: falhas.length,
+    saldo_acabou: saldoAcabou,
+    nao_tentados: saldoAcabou ? fila.length - enviados.length - falhas.length : 0,
     custo_estimado_usd: Number((enviados.length * 0.0625).toFixed(4)),
     detalhe_falhas: falhas.slice(0, 15),
+    aviso_ao_lucas: avisoEnviado,
     aviso: 'Aceito na fila da Meta NAO é entrega. O status real chega pelo webhook '
       + '(delivered / read / failed) e aparece no Message log da YCloud.',
   });
