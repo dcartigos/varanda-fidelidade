@@ -183,22 +183,60 @@ module.exports = async (req, res) => {
   const q = { ...(req.query || {}), ...(req.body || {}) };
 
   // ---- Autenticação -------------------------------------------------------
-  // Mesmo esquema já usado e testado em api/rotina-diaria.js:
-  //  1. Vercel Cron  -> manda o header 'x-vercel-cron'. Não precisa de token.
-  //  2. TESTE_TOKEN  -> senha simples só para abrir a URL no navegador e
-  //     conferir. Existe porque o APP_TOKEN é Sensitive no Vercel e ninguém
-  //     consegue reler o valor depois de salvo (isso já custou um dia de envio).
-  //  3. APP_TOKEN / IMPORT_TOKEN -> continuam valendo, para quem tiver o valor.
-  // Sem isso qualquer um na internet dispararia campanha paga em nome do Varanda.
-  const doCron = Boolean(req.headers['x-vercel-cron']);
+  //
+  // ⚠️ BUG QUE CUSTOU O PRIMEIRO DISPARO — 26/08/2026, NÃO REGREDIR
+  // A versão anterior identificava o Vercel Cron só pelo header
+  // 'x-vercel-cron'. Em 26/08 às 10h01 o cron rodou, chegou aqui e levou 401:
+  // a Vercel NÃO manda esse header. Ela identifica o cron pelo User-Agent
+  // 'vercel-cron/1.0' e, quando existe a variável CRON_SECRET, por
+  // 'Authorization: Bearer <CRON_SECRET>'. A função morreu em 144 ms, antes de
+  // falar com o Supabase e com a YCloud — nada foi enviado e nada foi cobrado,
+  // mas o dia de disparo foi perdido em silêncio.
+  //
+  // Agora aceita, em ordem de confiança:
+  //  1. Authorization: Bearer <CRON_SECRET>  -> à prova de falsificação. É o
+  //     caminho oficial da Vercel e o que deve valer em produção.
+  //  2. User-Agent vercel-cron/1.0 DENTRO da janela de horário do cron, e só
+  //     enquanto CRON_SECRET não existir. User-Agent qualquer um falsifica, por
+  //     isso essa porta é estreita (janela de hora) e se fecha sozinha no
+  //     momento em que o CRON_SECRET for criado.
+  //  3. header 'x-vercel-cron' -> mantido por segurança, caso a Vercel volte
+  //     a mandá-lo.
+  //  4. ?token= ou x-varanda-token com TESTE_TOKEN / IMPORT_TOKEN / APP_TOKEN
+  //     -> para chamada manual no navegador.
+  //
+  // Sem nada disso, qualquer um na internet dispararia campanha paga em nome
+  // do Varanda.
+  const segredoCron = process.env.CRON_SECRET;
+  const ua = String(req.headers['user-agent'] || '');
+  const ehUACron = /^vercel-cron\//i.test(ua);
+  const horaSP = agoraSP().getHours();
+
+  const porSegredo = Boolean(segredoCron)
+    && String(req.headers.authorization || '') === 'Bearer ' + segredoCron;
+  // Só as 10h: é a hora dos dois crons (10h00 e 10h30). Fora dela, não passa.
+  const porUA = !segredoCron && ehUACron && horaSP === 10;
+  const porHeader = Boolean(req.headers['x-vercel-cron']);
+
   const recebido = String((req.query && req.query.token)
     || req.headers['x-varanda-token'] || '').trim();
   const aceitos = [process.env.TESTE_TOKEN, process.env.IMPORT_TOKEN, process.env.APP_TOKEN]
     .filter(Boolean).map((s) => String(s).trim());
-  if (!doCron && (!recebido || !aceitos.includes(recebido))) {
+  const porToken = Boolean(recebido) && aceitos.includes(recebido);
+
+  const doCron = porSegredo || porUA || porHeader;
+
+  if (!doCron && !porToken) {
     return res.status(401).json({
       erro: 'Token inválido.',
       dica: 'Use ?token=SEU_TESTE_TOKEN (a variável TESTE_TOKEN do Vercel).',
+      // Diagnóstico sem vazar segredo: diz o que chegou, não o que era esperado.
+      visto: {
+        user_agent: ua.slice(0, 40),
+        tem_authorization: Boolean(req.headers.authorization),
+        cron_secret_configurado: Boolean(segredoCron),
+        hora_sp: horaSP,
+      },
     });
   }
 
@@ -288,6 +326,27 @@ module.exports = async (req, res) => {
       erro: 'Falha ao checar a imagem da arte.', imagem,
       detalhe: String(e && e.message ? e.message : e),
     });
+  }
+
+  // ---- TRAVA DE UMA VEZ POR DIA POR ARTE ---------------------------------
+  // Se esta arte já saiu hoje, não sai de novo. Protege contra: cron
+  // duplicado, alguém abrindo a URL duas vezes, retry da Vercel depois de um
+  // timeout, e contra alguém falsificando o User-Agent do cron (o pior caso
+  // fica limitado a zero envios extras, não a uma segunda leva de 98).
+  // Só o ?forcar=1 com token válido passa por cima.
+  if (!seco && !forcar) {
+    const j = await sb('/envios?select=telefone_e164&limit=1'
+      + '&arte=eq.' + encodeURIComponent(arteId)
+      + '&categoria=eq.marketing'
+      + '&criado_em=gte.' + encodeURIComponent(hoje + 'T00:00:00-03:00'));
+    if (j.ok && Array.isArray(j.corpo) && j.corpo.length > 0) {
+      return res.status(409).json({
+        erro: 'Esta arte já foi disparada hoje. Não vou mandar de novo.',
+        arte: arteId,
+        data: hoje,
+        dica: 'Se precisar mesmo repetir, chame com &forcar=1 e token.',
+      });
+    }
   }
 
   // ---- Tamanho do lote ----------------------------------------------------
