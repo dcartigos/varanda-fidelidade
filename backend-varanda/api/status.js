@@ -133,9 +133,13 @@ module.exports = async function handler(req, res) {
   const total = Object.keys(ultimo).length;
 
   // sem_whatsapp: telefones que devem ser marcados para nunca mais tentar
-  const semWhatsapp = falhas.filter((f) => f.erro === 131026).map((f) => f.telefone);
-  const janelaFechada = falhas.filter((f) => f.erro === 131047).map((f) => f.telefone);
-  const conexaoCaiu = falhas.some((f) => f.erro === 133010);
+  // ⚠️ CORRIGIDO EM 26/08/2026 (achado pelo Coletor): o banco guarda o código
+  // de erro como TEXTO ("131047"), e a comparação === com NÚMERO dá sempre
+  // falso. Por isso janela_24h_fechada e sem_whatsapp vinham vazios mesmo com
+  // as falhas listadas. String() dos dois lados resolve para sempre.
+  const semWhatsapp = falhas.filter((f) => String(f.erro) === '131026').map((f) => f.telefone);
+  const janelaFechada = falhas.filter((f) => String(f.erro) === '131047').map((f) => f.telefone);
+  const conexaoCaiu = falhas.some((f) => String(f.erro) === '133010');
 
   return responder(res, 200, {
     janela_minutos: minutos,
