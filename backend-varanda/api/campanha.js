@@ -215,12 +215,18 @@ module.exports = async (req, res) => {
   const porSegredo = Boolean(segredoCron)
     && String(req.headers.authorization || '') === 'Bearer ' + segredoCron;
   // A porta do User-Agent vale dentro da janela comercial (9h-17h, a mesma do
-  // janelaOk). Não é mais estreita que isso de propósito: quem realmente limita
-  // o dano de um User-Agent falsificado é a TRAVA DE UMA VEZ POR DIA POR ARTE
-  // mais abaixo -- com ela, o pior caso de uma chamada forjada é zero envios
-  // extras, porque a arte do dia já saiu. Janela de hora fechada demais só
-  // impede o botão "Run" da Vercel de testar, que foi o que travou em 26/08.
-  const porUA = !segredoCron && ehUACron && horaSP >= 9 && horaSP < 17;
+  // janelaOk). Quem limita o dano de um User-Agent falsificado é a TRAVA DE UMA
+  // VEZ POR DIA POR ARTE mais abaixo -- com ela, o pior caso de uma chamada
+  // forjada é zero envios extras, porque a arte do dia já saiu.
+  //
+  // ⚠️ ESTA PORTA CONTINUA ABERTA MESMO COM CRON_SECRET CONFIGURADO, DE PROPÓSITO.
+  // A versão de 11h de 26/08 tinha `!segredoCron &&` aqui: criar o CRON_SECRET
+  // FECHAVA a porta do User-Agent. Se por qualquer motivo a Vercel não mandasse
+  // o Authorization (variável salva no ambiente errado, deploy antigo, mudança
+  // deles), o disparo voltaria a morrer em 401 -- e criar um segredo para
+  // "reforçar a segurança" teria derrubado a rotina em silêncio, exatamente o
+  // erro do dia. Agora CRON_SECRET só ACRESCENTA um caminho, nunca remove.
+  const porUA = ehUACron && horaSP >= 9 && horaSP < 17;
   const porHeader = Boolean(req.headers['x-vercel-cron']);
 
   const recebido = String((req.query && req.query.token)
