@@ -214,8 +214,13 @@ module.exports = async (req, res) => {
 
   const porSegredo = Boolean(segredoCron)
     && String(req.headers.authorization || '') === 'Bearer ' + segredoCron;
-  // Só as 10h: é a hora dos dois crons (10h00 e 10h30). Fora dela, não passa.
-  const porUA = !segredoCron && ehUACron && horaSP === 10;
+  // A porta do User-Agent vale dentro da janela comercial (9h-17h, a mesma do
+  // janelaOk). Não é mais estreita que isso de propósito: quem realmente limita
+  // o dano de um User-Agent falsificado é a TRAVA DE UMA VEZ POR DIA POR ARTE
+  // mais abaixo -- com ela, o pior caso de uma chamada forjada é zero envios
+  // extras, porque a arte do dia já saiu. Janela de hora fechada demais só
+  // impede o botão "Run" da Vercel de testar, que foi o que travou em 26/08.
+  const porUA = !segredoCron && ehUACron && horaSP >= 9 && horaSP < 17;
   const porHeader = Boolean(req.headers['x-vercel-cron']);
 
   const recebido = String((req.query && req.query.token)
