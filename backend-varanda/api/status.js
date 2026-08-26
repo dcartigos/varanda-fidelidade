@@ -72,8 +72,14 @@ module.exports = async function handler(req, res) {
   if (req.method === 'OPTIONS') { res.status(204).end(); return; }
   if (req.method !== 'GET') return responder(res, 405, { erro: 'Use GET.' });
 
-  const recebido = req.headers['x-varanda-token'];
-  const aceitos = [process.env.IMPORT_TOKEN, process.env.APP_TOKEN].filter(Boolean);
+  // ⚠️ CORRIGIDO EM 26/08/2026 — três defeitos de uma vez:
+  //   1. não aceitava TESTE_TOKEN (o que o Coletor usa; rotina-diaria aceita)
+  //   2. não lia o token da URL (?token=), só do header
+  //   3. sem .trim() — o espaço invisível que já causou 401 por três dias
+  // Sintoma: 401 aqui com o MESMO token que funcionava no rotina-diaria.
+  const recebido = String((req.query && req.query.token) || req.headers['x-varanda-token'] || '').trim();
+  const aceitos = [process.env.TESTE_TOKEN, process.env.IMPORT_TOKEN, process.env.APP_TOKEN]
+    .filter(Boolean).map((t) => String(t).trim());
   if (aceitos.length === 0) {
     return responder(res, 500, { erro: 'Nenhum token configurado no servidor.' });
   }
