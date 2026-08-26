@@ -339,25 +339,23 @@ module.exports = async (req, res) => {
     });
   }
 
-  // ---- TRAVA DE UMA VEZ POR DIA POR ARTE ---------------------------------
-  // Se esta arte já saiu hoje, não sai de novo. Protege contra: cron
-  // duplicado, alguém abrindo a URL duas vezes, retry da Vercel depois de um
-  // timeout, e contra alguém falsificando o User-Agent do cron (o pior caso
-  // fica limitado a zero envios extras, não a uma segunda leva de 98).
-  // Só o ?forcar=1 com token válido passa por cima.
-  if (!seco && !forcar) {
-    const j = await sb('/envios?select=telefone_e164&limit=1'
+  // ---- QUANTO DESTA ARTE JÁ SAIU HOJE, DE VERDADE -------------------------
+  // Conta só o que a Meta ACEITOU (http < 300). Recusa não conta como enviado.
+  //
+  // Isso é o que permite o sistema se curar sozinho. Em 26/08 o saldo da YCloud
+  // acabou no meio do disparo: 51 aceitas e 51 recusadas com
+  // "403 The account balance is insufficient". Com uma trava burra de
+  // "já saiu hoje, não manda mais", as 51 que faltaram ficariam perdidas.
+  // Contando só os aceitos, o cron de repescagem completa o que faltou -- e se
+  // nada saiu, ele refaz o disparo inteiro.
+  let jaEnviadosHoje = 0;
+  if (!seco) {
+    const j = await sb('/envios?select=telefone_e164'
       + '&arte=eq.' + encodeURIComponent(arteId)
       + '&categoria=eq.marketing'
+      + '&http_status=lt.300'
       + '&criado_em=gte.' + encodeURIComponent(hoje + 'T00:00:00-03:00'));
-    if (j.ok && Array.isArray(j.corpo) && j.corpo.length > 0) {
-      return res.status(409).json({
-        erro: 'Esta arte já foi disparada hoje. Não vou mandar de novo.',
-        arte: arteId,
-        data: hoje,
-        dica: 'Se precisar mesmo repetir, chame com &forcar=1 e token.',
-      });
-    }
+    if (j.ok && Array.isArray(j.corpo)) jaEnviadosHoje = j.corpo.length;
   }
 
   // ---- Tamanho do lote ----------------------------------------------------
@@ -369,9 +367,25 @@ module.exports = async (req, res) => {
 
   const ehExtra = Boolean(arte.extra);
   const pct = q.pct != null ? Number(q.pct) : (ehExtra ? PCT_FEIJOADA : PCT_DIARIA);
-  const limite = q.limite != null
+  const alvoDoDia = q.limite != null
     ? Math.max(0, Number(q.limite))
     : Math.max(1, Math.round(baseTotal * pct / 100));
+
+  // O lote de agora é o que FALTA para fechar o alvo do dia. Numa execução
+  // limpa, jaEnviadosHoje = 0 e isto é o alvo inteiro. Numa repescagem depois
+  // de falha parcial, é só o buraco -- não manda a leva toda de novo.
+  const limite = forcar ? alvoDoDia : Math.max(0, alvoDoDia - jaEnviadosHoje);
+
+  if (!seco && limite === 0) {
+    return res.status(409).json({
+      erro: 'O alvo de hoje para esta arte já foi cumprido. Não vou mandar de novo.',
+      arte: arteId,
+      data: hoje,
+      alvo_do_dia: alvoDoDia,
+      ja_enviados_hoje: jaEnviadosHoje,
+      dica: 'Para repetir de propósito, chame com &forcar=1 e token.',
+    });
+  }
 
   // ---- A fila -------------------------------------------------------------
   const f = await sb('/rpc/fila_campanha', {
@@ -404,6 +418,8 @@ module.exports = async (req, res) => {
     legenda,
     base_elegivel: baseTotal,
     pct_pedida: pct,
+    alvo_do_dia: alvoDoDia,
+    ja_enviados_hoje: jaEnviadosHoje,
     limite_calculado: limite,
     fila_devolvida: f.corpo.length,
     fila_valida: fila.length,
