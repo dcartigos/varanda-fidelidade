@@ -31,7 +31,28 @@
 
 const { supabaseConfigurado } = require('./_lib/supabase');
 
-const TEMPLATE = 'resgate_pontos_fidelidade';
+// ----------------------------------------------------------------------------
+// AS DUAS CAMPANHAS (28/08/2026): &faixa=resgate (padrão) ou &faixa=quase.
+//   resgate -> 100+ pontos, template resgate_pontos_fidelidade,
+//              params [nome, pontos, valor R$]
+//   quase   -> 70 a 99 pontos, template quase_la_pontos,
+//              params [nome, pontos]  (sem valor — ainda não resgata)
+// Chaves de idempotência separadas (resgate| e quase|): uma campanha nunca
+// bloqueia nem duplica a outra.
+// ----------------------------------------------------------------------------
+const CAMPANHAS = {
+  resgate: {
+    template: 'resgate_pontos_fidelidade',
+    saldo_min: 100, saldo_max: null,
+    prefixo_chave: 'resgate',
+  },
+  quase: {
+    template: 'quase_la_pontos',
+    saldo_min: 70, saldo_max: 99,
+    prefixo_chave: 'quase',
+  },
+};
+
 const LOTE_MAXIMO = 45;
 const TETO_DIARIO = 150;
 
@@ -118,6 +139,12 @@ module.exports = async function handler(req, res) {
   const hoje = agoraBR.toISOString().slice(0, 10);
   const mes = hoje.slice(0, 7); // AAAA-MM — chave mensal
 
+  const nomeCampanha = (req.query && req.query.faixa) || 'resgate';
+  const camp = CAMPANHAS[nomeCampanha];
+  if (!camp) {
+    return responder(res, 400, { erro: 'faixa desconhecida. Use faixa=resgate ou faixa=quase.' });
+  }
+
   // ---------------------------------------------------------------- A FILA
   // Quem tem 100+ pontos, tem WhatsApp, não pediu SAIR, e AINDA NÃO recebeu
   // a campanha deste mês. Ordem crescente de saldo.
@@ -128,13 +155,15 @@ module.exports = async function handler(req, res) {
   );
 
   const jaFoi = await sb('/envios?select=telefone_e164&chave_idempotencia=like.' +
-    encodeURIComponent('resgate|*|' + mes));
+    encodeURIComponent(camp.prefixo_chave + '|*|' + mes));
   const jaReceberam = new Set(
     (jaFoi.ok && Array.isArray(jaFoi.corpo) ? jaFoi.corpo : []).map((e) => e.telefone_e164)
   );
 
   const q = await sb('/base_clientes?select=telefone_e164,nome,saldo_pontos' +
-    '&saldo_pontos=gte.100&or=(sem_whatsapp.is.null,sem_whatsapp.is.false)' +
+    '&saldo_pontos=gte.' + camp.saldo_min +
+    (camp.saldo_max ? '&saldo_pontos=lte.' + camp.saldo_max : '') +
+    '&or=(sem_whatsapp.is.null,sem_whatsapp.is.false)' +
     '&order=saldo_pontos.asc&limit=600');
   if (!q.ok) return responder(res, 502, { erro: 'Falha ao ler base_clientes.', detalhe: q.corpo });
 
@@ -148,6 +177,8 @@ module.exports = async function handler(req, res) {
 
   const resultado = {
     dia: hoje,
+    campanha: nomeCampanha + ' (' + camp.template + ', saldo ' + camp.saldo_min +
+      (camp.saldo_max ? '-' + camp.saldo_max : '+') + ')',
     modo: disparar ? 'DISPARO REAL' : 'prévia (seco) — nada enviado',
     fila_total: fila.length,
     ja_receberam_no_mes: enviadosHoje,
@@ -184,10 +215,14 @@ module.exports = async function handler(req, res) {
   for (const c of lote) {
     const r = await enviar({
       telefone: c.telefone_e164,
-      template: TEMPLATE,
+      template: camp.template,
       idioma: 'pt_BR',
-      parametros: [primeiroNome(c.nome), String(c.saldo_pontos), valorBR(c.saldo_pontos)],
-      chave: 'resgate|' + c.telefone_e164 + '|' + mes,
+      // resgate: [nome, pontos, valor] · quase: [nome, pontos] — o número de
+      // parâmetros PRECISA bater com o template aprovado (erro 132000 se não).
+      parametros: nomeCampanha === 'quase'
+        ? [primeiroNome(c.nome), String(c.saldo_pontos)]
+        : [primeiroNome(c.nome), String(c.saldo_pontos), valorBR(c.saldo_pontos)],
+      chave: camp.prefixo_chave + '|' + c.telefone_e164 + '|' + mes,
       // SEM forcar: se a chave já existe, o servidor recusa — é a garantia
       // de no máximo 1 por cliente por mês, mesmo rodando isto 10 vezes.
     });
