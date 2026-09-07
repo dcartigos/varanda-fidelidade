@@ -236,7 +236,10 @@ module.exports = async function handler(req, res) {
       idioma: 'pt_BR',
       // resgate: [nome, pontos, valor] · quase: [nome, pontos] — o número de
       // parâmetros PRECISA bater com o template aprovado (erro 132000 se não).
-      parametros: nomeCampanha === 'quase'
+      // BUG CORRIGIDO 04/09/2026: a decisao era pelo NOME da campanha, nao
+      // pelo TEMPLATE. A faixa 'inicio' usa template de 2 variaveis e caia no
+      // ramo de 3 -> erro 132000 em 150 mensagens (nada entregue).
+      parametros: camp.template === 'quase_la_pontos'
         ? [primeiroNome(c.nome), String(c.saldo_pontos)]
         : [primeiroNome(c.nome), String(c.saldo_pontos), valorBR(c.saldo_pontos)],
       chave: camp.prefixo_chave + '|' + c.telefone_e164 + '|' + mes,
