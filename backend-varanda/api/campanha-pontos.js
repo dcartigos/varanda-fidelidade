@@ -175,7 +175,13 @@ module.exports = async function handler(req, res) {
     '&saldo_pontos=gte.' + camp.saldo_min +
     (camp.saldo_max ? '&saldo_pontos=lte.' + camp.saldo_max : '') +
     '&or=(sem_whatsapp.is.null,sem_whatsapp.is.false)' +
-    '&order=saldo_pontos.asc&limit=600');
+    // ORDEM: padrao crescente (menor saldo primeiro - decisao de 26/08: se algo
+    // estiver errado, o erro aparece nos saldos pequenos, nao nos melhores
+    // clientes). Com &ordem=desc manda os MAIORES saldos primeiro - usado em
+    // 04/09/2026 na faixa 1-69, para comecar por quem esta mais perto dos 100
+    // pontos (ai o 'Falta pouco!' do template e verdadeiro).
+    '&order=saldo_pontos.' + (req.query && req.query.ordem === 'desc' ? 'desc' : 'asc') +
+    '&limit=600');
   if (!q.ok) return responder(res, 502, { erro: 'Falha ao ler base_clientes.', detalhe: q.corpo });
 
   const fila = (q.corpo || []).filter((c) =>
