@@ -51,6 +51,17 @@ const CAMPANHAS = {
     saldo_min: 70, saldo_max: 99,
     prefixo_chave: 'quase',
   },
+  // Faixa adicionada em 04/09/2026 por decisão do Lucas: mandar também para
+  // quem tem de 1 a 69 pontos (329 pessoas), usando o MESMO template.
+  // ⚠️ Ressalva registrada: o texto diz "Falta pouco!" — verdadeiro para 50-69
+  // pontos, exagerado para quem tem 20. O Lucas foi avisado e decidiu enviar.
+  // Ordem crescente de saldo continua valendo, então os primeiros lotes pegam
+  // justamente os saldos menores.
+  inicio: {
+    template: 'quase_la_pontos',
+    saldo_min: 1, saldo_max: 69,
+    prefixo_chave: 'inicio',
+  },
 };
 
 const LOTE_MAXIMO = 45;
