@@ -49,6 +49,7 @@
 // Agora: uma falha no PC = todos recebem 80% do relatório, e sabem o que faltou.
 
 const { supabaseConfigurado } = require('./_lib/supabase');
+const { enviarTelegram } = require('./telegram');
 
 const EQUIPE = [
   { nome: 'Lucas',    telefone: '+5544999691829', completo: true },
@@ -372,6 +373,19 @@ module.exports = async function handler(req, res) {
       else { resultado.fechamento.falharam++; resultado.fechamento.detalhe.push(p.nome + ': ' + r.erro); }
       await new Promise((x) => setTimeout(x, 400));
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // TELEGRAM — canal interno, adicionado em 11/09/2026 (ideia do Lucas).
+  // O relatorio falhava quase todo dia para o Leopoldo por causa da janela de
+  // 24h da Meta (erro 131047). No Telegram nao existe janela, template nem
+  // custo por mensagem. O WhatsApp continua para CLIENTE; o relatorio interno
+  // passa a ter aqui a sua fonte confiavel.
+  // Nunca derruba a rotina: se falhar, apenas registra o motivo.
+  // -------------------------------------------------------------------------
+  if (!seco) {
+    const tg = await enviarTelegram(completo);
+    resultado.telegram = { enviado: !!tg.ok, erro: tg.erro || null };
   }
 
   // ⚠️ 'enviados' aqui significa ACEITO PELA META, não entregue.
