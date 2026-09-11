@@ -189,7 +189,13 @@ module.exports = async function handler(req, res) {
   );
 
   const enviadosHoje = jaReceberam.size;
-  const cabemHoje = Math.max(0, TETO_DIARIO - enviadosHoje);
+  // Teto diario: padrao 150 (protege a nota de qualidade do numero, que e o
+  // mesmo dos pontos e do cardapio). &teto=N sobe o limite SO naquela chamada,
+  // com um maximo absoluto de 250. Usado em 11/09/2026 para fechar os 51 que
+  // faltavam dos 100+ no mesmo dia, a pedido do Lucas.
+  const tetoPedido = parseInt(req.query && req.query.teto, 10);
+  const teto = (Number.isFinite(tetoPedido) && tetoPedido > 0) ? Math.min(tetoPedido, 250) : TETO_DIARIO;
+  const cabemHoje = Math.max(0, teto - enviadosHoje);
   const lote = fila.slice(0, Math.min(LOTE_MAXIMO, cabemHoje));
 
   const resultado = {
