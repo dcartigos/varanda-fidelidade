@@ -87,6 +87,23 @@ module.exports = async function handler(req, res) {
     });
   }
 
+  // DIAGNOSTICO (11/09/2026): diz de QUAL bot e o token e se existe webhook
+  // consumindo os updates. Criado porque 'descobrir' devolvia 0 chats mesmo
+  // depois do /start - precisava saber se o token era do bot certo.
+  if (acao === 'diagnostico') {
+    const me = await (await fetch('https://api.telegram.org/bot' + token + '/getMe')).json().catch(() => ({}));
+    const wh = await (await fetch('https://api.telegram.org/bot' + token + '/getWebhookInfo')).json().catch(() => ({}));
+    const up = await (await fetch('https://api.telegram.org/bot' + token + '/getUpdates?limit=100')).json().catch(() => ({}));
+    return responder(res, 200, {
+      bot_do_token: me.ok ? ('@' + (me.result && me.result.username)) : null,
+      getMe_ok: !!me.ok,
+      getMe_erro: me.ok ? null : (me.description || null),
+      webhook_url: wh.ok ? ((wh.result && wh.result.url) || '(nenhum)') : null,
+      updates_pendentes: up.ok ? (up.result || []).length : null,
+      updates_erro: up.ok ? null : (up.description || null),
+    });
+  }
+
   if (acao === 'descobrir') {
     const r = await fetch('https://api.telegram.org/bot' + token + '/getUpdates?limit=100');
     const j = await r.json().catch(() => ({}));
