@@ -167,22 +167,69 @@ function semSaldo(resposta) {
 
 // Manda um WhatsApp de texto para o Lucas. Usa o _lib/envio.js -- a mesma
 // função que já sustenta o envio de pontos e o relatório de fechamento.
-//
-// Vai com forcar: true de propósito. A trava de horário do envio.js bloqueia
-// antes das 11h, e o aviso mais importante é justamente o das 10h, quando o
-// disparo falha. Aviso operacional para o dono não é marketing: não tem hora.
 async function avisarLucas(texto) {
+  const corpo = String(texto).slice(0, 900);
+  const resultado = { telegram: null, whatsapp: null, ok: false };
+
+  // ---- 1) TELEGRAM: o canal certo para aviso interno ----------------------
+  // Sem janela de 24h, sem template, sem custo, e -- o que mais importa aqui --
+  // SEM DEPENDER DO SALDO DA YCLOUD. Um aviso de "acabou o saldo" que precisa
+  // de saldo para ser entregue nao serve para nada.
   try {
-    const { enviarMensagem } = require('./_lib/envio');
-    const r = await enviarMensagem({
-      telefone: DONO,
-      texto: String(texto).slice(0, 900),
-      forcar: true,
-    });
-    return { ok: Boolean(r && r.aceito), detalhe: r && (r.erro || r.status) };
+    const { enviarTelegram } = require('./telegram');
+    const t = await enviarTelegram(corpo);
+    resultado.telegram = { ok: Boolean(t && t.ok), erro: (t && t.erro) || null };
+    if (resultado.telegram.ok) resultado.ok = true;
   } catch (e) {
-    // Um aviso que falha NUNCA pode derrubar o disparo. Ele é o acessório.
-    return { ok: false, detalhe: String(e && e.message ? e.message : e) };
+    resultado.telegram = { ok: false, erro: String(e && e.message ? e.message : e) };
+  }
+
+  // ---- 2) WhatsApp: so como reserva, se o Telegram falhar ------------------
+  // Fica de reserva e nao de canal principal por causa da JANELA DE 24 HORAS da
+  // Meta: texto livre so e entregue a quem conversou com o numero nas ultimas
+  // 24h. Fora dela a Meta responde 200 e descarta em silencio.
+  if (!resultado.ok) {
+    try {
+      const { enviarMensagem } = require('./_lib/envio');
+      const r = await enviarMensagem({ telefone: DONO, texto: corpo, forcar: true });
+      resultado.whatsapp = {
+        aceito: Boolean(r && r.aceito),
+        erro: (r && r.erro) || null,
+        aviso: 'aceito pela Meta NAO e entregue -- fora da janela de 24h ela descarta',
+      };
+    } catch (e) {
+      resultado.whatsapp = { aceito: false, erro: String(e && e.message ? e.message : e) };
+    }
+  }
+
+  // Um aviso que falha NUNCA pode derrubar o disparo. Ele e o acessorio.
+  return resultado;
+}
+
+// ---------------------------------------------------------------------------
+// SALDO DA YCLOUD -- aviso ANTES de quebrar, nao depois (22/09/2026)
+// ---------------------------------------------------------------------------
+// De 13 a 21/09 o saldo ficou zerado e o sistema so percebeu tentando e
+// levando 403. Nove dias parados. Esta funcao olha o saldo antes de comecar.
+//
+// DEFENSIVA DE PROPOSITO: se o endereco da API mudar, se a resposta vier em
+// outro formato, ou se a rede falhar, ela devolve null e o disparo segue
+// normalmente. Um termometro quebrado nunca pode impedir o almoco de sair.
+async function saldoYCloud(chaveYCloud) {
+  try {
+    const r = await fetch('https://api.ycloud.com/v2/balance', {
+      headers: { 'X-API-Key': chaveYCloud, accept: 'application/json' },
+    });
+    if (!r.ok) return null;
+    const j = await r.json().catch(() => null);
+    // Aceita alguns formatos possiveis sem depender de um so.
+    const bruto = j && (j.balance != null ? j.balance
+      : j.amount != null ? j.amount
+      : j.available != null ? j.available : null);
+    const n = Number(bruto);
+    return Number.isFinite(n) ? n : null;
+  } catch (e) {
+    return null;
   }
 }
 
@@ -475,6 +522,22 @@ module.exports = async (req, res) => {
     });
   }
 
+  // ---- Saldo suficiente para o lote inteiro? ------------------------------
+  // Custo Meta por mensagem de marketing: US$ 0,0625. Se a carteira nao cobre
+  // o lote, avisa ANTES -- e avisa por Telegram, que nao depende desse saldo.
+  // Nao bloqueia o disparo: manda o que der e o laco para sozinho no primeiro
+  // 403. Bloquear seria pior, porque metade da leva ainda vale mais que zero.
+  const saldo = await saldoYCloud(chaveYCloud);
+  const custoDoLote = fila.length * 0.0625;
+  if (saldo != null && saldo < custoDoLote) {
+    await avisarLucas(
+      'VARANDA - SALDO BAIXO NA YCLOUD. Saldo: US$ ' + saldo.toFixed(2)
+      + '. O disparo de hoje (' + arteId + ', ' + fila.length + ' pessoas) custa '
+      + 'US$ ' + custoDoLote.toFixed(2) + '. Vou mandar o que o saldo cobrir. '
+      + 'Recarregue em ycloud.com/console (Settings > Billing).'
+    );
+  }
+
   // ---- Envio --------------------------------------------------------------
   // Sequencial, com pausa curta. Rajada paralela em número novo derruba a
   // qualidade do número na Meta, e a qualidade é o que define o limite diário.
@@ -588,6 +651,7 @@ module.exports = async (req, res) => {
     ...resumo,
     enviados: enviados.length,
     falhas: falhas.length,
+    saldo_ycloud_usd: saldo,
     saldo_acabou: saldoAcabou,
     nao_tentados: saldoAcabou ? fila.length - enviados.length - falhas.length : 0,
     custo_estimado_usd: Number((enviados.length * 0.0625).toFixed(4)),
