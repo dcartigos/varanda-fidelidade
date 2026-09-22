@@ -123,22 +123,30 @@ async function login(page) {
   if (lembrar && !(await lembrar.isChecked())) await lembrar.check().catch(() => {});
   await page.click('#btnLogar');
 
-  // Espera o formulário sumir OU a URL mudar OU um erro aparecer.
+  // Espera o formulário sumir OU um erro aparecer.
+  // ⚠️ 22/09/2026: enquanto o Nomos troca de página depois do login, qualquer
+  // page.$ / page.evaluate pode explodir com "Execution context was destroyed".
+  // Isso NÃO é falha de login -- é a página navegando. Por isso cada olhada
+  // está protegida: se a página estava no meio de uma troca, espera e olha de novo.
   const limite = Date.now() + 45000;
   while (Date.now() < limite) {
     await dorme(1000);
-    const temSenha = await page.$('#senha');
+    let temSenha;
+    try { temSenha = await page.$('#senha'); }
+    catch (e) { await page.waitForLoadState('domcontentloaded').catch(() => {}); continue; }
     if (!temSenha) break;
     const erro = await page.evaluate(() => {
       const el = document.querySelector('.jconfirm-content, .alert-danger, .notificacao, .toast-message, .swal2-html-container');
       return el ? el.innerText.trim().slice(0, 200) : '';
     }).catch(() => '');
-    if (erro) throw new Error('Nomos recusou o login: ' + erro);
+    if (/senha|usu[aá]rio|inv[aá]lid|incorret|bloquead/i.test(erro)) throw new Error('Nomos recusou o login: ' + erro);
   }
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
 
   await page.goto(NOMOS + '/app/varanda/gestorpedido', { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await dorme(2000);
-  if (await page.$('#senha')) {
+  await dorme(2500);
+  const aindaNoLogin = await page.$('#senha').catch(() => null);
+  if (aindaNoLogin) {
     throw new Error('LOGIN FALHOU: depois de enviar usuário e senha o Nomos continuou na tela de login. '
       + 'Ou a senha mudou, ou o Nomos bloqueou. Ninguém digitou nada errado por aqui — conferir NOMOS_USUARIO / NOMOS_SENHA no cofre.');
   }
