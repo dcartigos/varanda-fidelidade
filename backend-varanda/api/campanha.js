@@ -506,8 +506,15 @@ module.exports = async (req, res) => {
   };
 
   if (seco) {
+    // 22/09/2026: a simulacao passou a mostrar o saldo da YCloud. E o unico
+    // jeito de olhar a carteira sem mandar nada -- a chave da API so existe
+    // aqui dentro. Se a consulta falhar vem null, e isso nao quebra nada.
+    const saldoSeco = await saldoYCloud(chaveYCloud);
     return res.status(200).json({
       ...resumo,
+      saldo_ycloud_usd: saldoSeco,
+      custo_deste_lote_usd: +(fila.length * 0.0625).toFixed(2),
+      mensagens_que_o_saldo_cobre: saldoSeco == null ? null : Math.floor(saldoSeco / 0.0625),
       aviso: 'SIMULACAO. Nada foi enviado e nada foi gravado.',
       amostra: fila.slice(0, 5).map((p) => p.telefone_e164),
     });
