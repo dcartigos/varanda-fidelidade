@@ -145,7 +145,28 @@ module.exports = async function handler(req, res) {
   //     rotacionando segredo para poder testar foi o que travou 21/08.
   //
   //  3. APP_TOKEN / IMPORT_TOKEN -> continuam valendo, para quem tiver o valor.
-  const doCron = !!req.headers['x-vercel-cron'];
+  //
+  //  ⚠️ CORRIGIDO EM 22/09/2026 — O MESMO BUG QUE MATOU A CAMPANHA EM 26/08.
+  //  A linha aqui era `!!req.headers['x-vercel-cron']`. A Vercel NÃO manda
+  //  esse cabeçalho. Ela se identifica pelo User-Agent 'vercel-cron/1.0'.
+  //  Resultado: todo dia às 15h a Vercel chamava, levava 401 e ia embora em
+  //  silêncio. Esta rotina NUNCA rodou sozinha -- só rodava quando alguem
+  //  chamava na mao com token, de dentro do fluxo do COLETOR. Por isso ela
+  //  parou junto com o coletor em 14/09.
+  //  O cabecalho antigo continua aceito: se um dia a Vercel passar a mandar,
+  //  funciona. Tirar seria trocar um caminho quebrado por outro.
+  const ua = String(req.headers['user-agent'] || '');
+  const ehUACron = /^vercel-cron\//i.test(ua);
+  // Janela de horario no caminho do User-Agent: o cron e 15h (plano Hobby tem
+  // precisao de ate 59min). Aceita das 14h as 18h e nada fora disso, para que
+  // um User-Agent forjado nao consiga rodar a rotina de madrugada.
+  const horaBR = new Date(Date.now() - 3 * 3600 * 1000).getUTCHours();
+  const segredoCron = process.env.CRON_SECRET;
+  const porSegredo = Boolean(segredoCron)
+    && String(req.headers.authorization || '') === 'Bearer ' + segredoCron;
+  const doCron = !!req.headers['x-vercel-cron']
+    || porSegredo
+    || (ehUACron && horaBR >= 14 && horaBR < 18);
   const recebido = String((req.query && req.query.token) || req.headers['x-varanda-token'] || '').trim();
   const aceitos = [process.env.TESTE_TOKEN, process.env.IMPORT_TOKEN, process.env.APP_TOKEN]
     .filter(Boolean).map((t) => String(t).trim());
@@ -153,6 +174,9 @@ module.exports = async function handler(req, res) {
     return responder(res, 401, {
       erro: 'Token inválido.',
       dica: 'Use ?token=SEU_TESTE_TOKEN (a variável TESTE_TOKEN do Vercel).',
+      // Diagnostico sem vazar segredo: diz o que chegou, nao o que era esperado.
+      visto: { user_agent: ua.slice(0, 40), hora_br: horaBR,
+        tem_authorization: Boolean(req.headers.authorization) },
     });
   }
   if (!supabaseConfigurado()) {
