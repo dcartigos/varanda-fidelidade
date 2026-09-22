@@ -188,7 +188,15 @@ module.exports = async function handler(req, res) {
 
     // Testa na hora: guardar sem testar é o erro que a gente já cometeu 3 vezes.
     const t = await chamarNomos(par, 1);
-    const funcionou = !!(t.json && !t.redirecionou && !t.pareceLogin);
+    // 22/09/2026 -- FALTAVA CONFERIR O HTTP.
+  // A condicao era so (tem json && nao redirecionou && nao parece login). Com o
+  // cookie expirado o Nomos devolve 401 com um corpo JSON curto, sem redirecionar
+  // e sem cara de tela de login -- entao o teste respondia "FUNCIONOU" com zero
+  // pedidos e gravava ultimo_status='ok'. Um teste de saude que mente e pior que
+  // nao ter teste nenhum: foi assim que a sessao ficou 28 dias morta sem ninguem
+  // perceber. Agora exige HTTP de sucesso.
+  const funcionou = !!(t.json && !t.redirecionou && !t.pareceLogin
+    && Number(t.http) > 0 && Number(t.http) < 300);
 
     await sb('/nomos_sessao?id=eq.1', {
       method: 'PATCH',
