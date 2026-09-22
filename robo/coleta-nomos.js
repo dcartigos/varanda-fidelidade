@@ -430,6 +430,9 @@ async function lerPontos(pageInicial) {
         ? 'Conferir usuario/senha do Nomos no cofre do GitHub (Settings > Secrets).'
         : 'Ver o log da execucao no GitHub Actions.'));
     if (execucaoId) {
+      // O erro inteiro vai em detalhe.erro (até 4000 chars): é ali que fica o
+      // raio-x da tela, e é ele que permite consertar sem chute.
+      detalhe.erro = msg.slice(0, 4000);
       await coleta({ acao: 'fechar_log', execucao_id: execucaoId, sucesso: false, mensagem: 'robô falhou em ' + passo + ': ' + msg.slice(0, 300), detalhe }).catch(() => {});
     }
     if (browser) await browser.close().catch(() => {});
