@@ -188,7 +188,12 @@ module.exports = async function handler(req, res) {
   // A separação existe porque o token que vive num site que não é nosso tem
   // que ser o de menor poder possível.
   const recebido = req.headers['x-varanda-token'];
-  const aceitos = [process.env.IMPORT_TOKEN, process.env.APP_TOKEN].filter(Boolean);
+  //   TESTE_TOKEN   -> 22/09/2026: aceito também. É o token do ROBÔ de coleta
+  //                    (GitHub Actions). Ele já abre /api/coleta, que grava
+  //                    pontos, buffet e o status da coleta — coisas mais
+  //                    sensíveis do que pedidos. Recusar só aqui não protegia
+  //                    nada: só fazia o robô morrer no passo 2 com 401.
+  const aceitos = [process.env.IMPORT_TOKEN, process.env.APP_TOKEN, process.env.TESTE_TOKEN].filter(Boolean);
 
   if (aceitos.length === 0) {
     return responder(res, 500, {
