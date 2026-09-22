@@ -28,6 +28,17 @@
 //      cashback 10% — print do Nomos, 26/08)
 //   6. chave mensal: cada cliente recebe NO MÁXIMO 1 por mês
 //   7. teto absoluto de 150 envios por dia nesta campanha
+//
+// SEGUNDA RODADA NO MESMO MÊS — &rodada=2 (22/09/2026)
+// A trava 6 existe para ninguém levar a mesma mensagem duas vezes no mesmo
+// mês. Em 22/09/2026 o Lucas pediu, com o aviso na mesa, para mandar de novo
+// para TODOS os 100+ pontos, sabendo que 201 deles já tinham recebido em
+// 11/09. Em vez de desligar a trava (o que deixaria a campanha sem rede de
+// proteção nenhuma), &rodada=N muda a chave para resgate|tel|AAAA-MM#N.
+// Efeito: a rodada 2 é uma campanha nova, com idempotência própria — chamar
+// a rodada 2 dez vezes continua mandando no máximo 1 por cliente. Sem o
+// parâmetro, o comportamento antigo (1 por mês) continua exatamente igual.
+// Precisa de &teto=250 junto, senão o teto diário de 150 corta a fila.
 
 const { supabaseConfigurado } = require('./_lib/supabase');
 
@@ -150,6 +161,14 @@ module.exports = async function handler(req, res) {
   const hoje = agoraBR.toISOString().slice(0, 10);
   const mes = hoje.slice(0, 7); // AAAA-MM — chave mensal
 
+  // &rodada=N -> sufixo #N na chave de idempotência. Sem o parâmetro (ou com
+  // rodada=1) nada muda: a chave continua resgate|tel|AAAA-MM.
+  const rodadaPedida = parseInt((req.query && req.query.rodada) || '1', 10);
+  const rodada = (Number.isFinite(rodadaPedida) && rodadaPedida >= 1 && rodadaPedida <= 9)
+    ? rodadaPedida : 1;
+  const sufixoRodada = rodada > 1 ? '#' + rodada : '';
+  const chaveMes = mes + sufixoRodada;
+
   const nomeCampanha = (req.query && req.query.faixa) || 'resgate';
   const camp = CAMPANHAS[nomeCampanha];
   if (!camp) {
@@ -166,7 +185,7 @@ module.exports = async function handler(req, res) {
   );
 
   const jaFoi = await sb('/envios?select=telefone_e164&chave_idempotencia=like.' +
-    encodeURIComponent(camp.prefixo_chave + '|*|' + mes));
+    encodeURIComponent(camp.prefixo_chave + '|*|' + chaveMes));
   const jaReceberam = new Set(
     (jaFoi.ok && Array.isArray(jaFoi.corpo) ? jaFoi.corpo : []).map((e) => e.telefone_e164)
   );
@@ -203,6 +222,8 @@ module.exports = async function handler(req, res) {
     campanha: nomeCampanha + ' (' + camp.template + ', saldo ' + camp.saldo_min +
       (camp.saldo_max ? '-' + camp.saldo_max : '+') + ')',
     modo: disparar ? 'DISPARO REAL' : 'prévia (seco) — nada enviado',
+    rodada: rodada,
+    chave_usada: camp.prefixo_chave + '|<telefone>|' + chaveMes,
     fila_total: fila.length,
     ja_receberam_no_mes: enviadosHoje,
     bloqueados_sair: bloqueados.size,
@@ -248,7 +269,7 @@ module.exports = async function handler(req, res) {
       parametros: camp.template === 'quase_la_pontos'
         ? [primeiroNome(c.nome), String(c.saldo_pontos)]
         : [primeiroNome(c.nome), String(c.saldo_pontos), valorBR(c.saldo_pontos)],
-      chave: camp.prefixo_chave + '|' + c.telefone_e164 + '|' + mes,
+      chave: camp.prefixo_chave + '|' + c.telefone_e164 + '|' + chaveMes,
       // SEM forcar: se a chave já existe, o servidor recusa — é a garantia
       // de no máximo 1 por cliente por mês, mesmo rodando isto 10 vezes.
     });
