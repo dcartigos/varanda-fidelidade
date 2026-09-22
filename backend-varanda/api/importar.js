@@ -79,7 +79,21 @@ function valorParaNumero(txt) {
  */
 function dataParaISO(txt, anoBase) {
   if (!txt) return null;
-  const m = String(txt).trim().match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?[ ,]*(\d{1,2}):(\d{2})?/);
+  const bruto = String(txt).trim();
+
+  // 22/09/2026 -- ACEITA TAMBEM O FORMATO DO listarJson.
+  // Em 15/09 o coletor passou a usar o atalho JSON do Nomos, que devolve a
+  // data como "2026-09-15 13:46:00" (ano na frente, com tracos). Este leitor
+  // so entendia "15/09 13:46". Resultado: 234 pedidos recusados com "data
+  // ilegivel", coleta travada, e 8 dias sem pontos. O formato ISO e
+  // inequivoco, entao entra direto -- ja com o -03:00 de Brasilia.
+  const fmtIso = bruto.match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{1,2}):(\d{2})/);
+  if (fmtIso) {
+    const d = new Date(Date.UTC(+fmtIso[1], +fmtIso[2] - 1, +fmtIso[3], +fmtIso[4] + 3, +fmtIso[5]));
+    return isNaN(d.getTime()) ? null : d.toISOString();
+  }
+
+  const m = bruto.match(/^(\d{1,2})\/(\d{1,2})(?:\/(\d{2,4}))?[ ,]*(\d{1,2}):(\d{2})?/);
   if (!m) return null;
 
   const dia = +m[1];

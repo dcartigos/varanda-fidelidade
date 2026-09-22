@@ -1,0 +1,69 @@
+# ============================================================================
+# O ROBÔ DE COLETA DO NOMOS — 14h de Brasília, segunda a sábado  (22/09/2026)
+# ============================================================================
+#
+# O QUE FAZ: abre um navegador invisível aqui no GitHub, faz o login no Nomos
+# com o usuário e a senha do cofre (Settings > Secrets), lê pedidos / pontos /
+# kg / buffet e grava tudo no nosso banco pelas portas /api/importar e
+# /api/coleta. Às 15h a Vercel (/api/rotina-diaria) encontra a coleta completa
+# e manda os pontos e o fechamento sozinha.
+#
+# POR QUE AQUI E NÃO NA VERCEL: a Vercel roda funções curtas sem navegador.
+# O login do Nomos precisa de um navegador de verdade (o botão é JavaScript).
+# O GitHub Actions dá um Linux inteiro, com Chromium, de graça, por agenda.
+#
+# COFRE — os 3 secrets que este robô precisa (Settings > Secrets and variables
+# > Actions > New repository secret):
+#   NOMOS_USUARIO   -> o usuário do Nomos
+#   NOMOS_SENHA     -> a senha do Nomos
+#   VARANDA_TOKEN   -> o TESTE_TOKEN da Vercel (abre /api/coleta, /api/importar, /api/telegram)
+#
+# HORÁRIO: cron é em UTC. 17:00 UTC = 14:00 Brasília. O GitHub pode atrasar
+# alguns minutos em horário de pico; a rotina das 15h dá 1h de folga.
+#
+# TESTE MANUAL: aba Actions > "coleta nomos 14h" > Run workflow. Marcando
+# "só testar o login" ele loga, confere e para, sem gravar nada.
+# ============================================================================
+
+name: coleta nomos 14h
+
+on:
+  schedule:
+    - cron: '0 17 * * 1-6'
+  workflow_dispatch:
+    inputs:
+      so_testar_login:
+        description: 'Só testar o login (não grava nada)'
+        type: boolean
+        default: false
+
+concurrency:
+  group: coleta-nomos
+  cancel-in-progress: false
+
+jobs:
+  coletar:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: instalar o navegador
+        working-directory: robo
+        run: |
+          npm install --no-audit --no-fund playwright@1.47.2
+          npx playwright install --with-deps chromium
+
+      - name: rodar o robô
+        working-directory: robo
+        env:
+          NOMOS_USUARIO: ${{ secrets.NOMOS_USUARIO }}
+          NOMOS_SENHA: ${{ secrets.NOMOS_SENHA }}
+          VARANDA_TOKEN: ${{ secrets.VARANDA_TOKEN }}
+          BACKEND: https://varanda-backend.vercel.app
+          SO_TESTAR_LOGIN: ${{ inputs.so_testar_login == true && '1' || '0' }}
+        run: node coleta-nomos.js
