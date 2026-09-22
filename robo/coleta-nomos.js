@@ -338,9 +338,15 @@ async function lerPontos(pageInicial) {
   // o robô ficava olhando a aba velha. Agora o clique é um clique de verdade
   // do Playwright, e o robô espera até 15s por uma aba nova; se vier, segue
   // nela; se não vier, continua na atual.
-  let botao = page.locator('tr', { hasText: /fidelidade/i }).locator('button.btnCrmRelatorioVisualizar').first();
-  if (await botao.count() === 0) botao = page.locator('button.btnCrmRelatorioVisualizar').first();
-  if (await botao.count() === 0) throw new Error('Não achei o botão do relatório de fidelidade no CRM.');
+  // 22/09/2026 (raio-x da 6a rodada): são 5 botões de olho e as linhas NÃO
+  // são <tr>, então o robô caía no 1o botão -- "Clientes novos", que abre um
+  // filtro de data e não uma tabela. O botão certo tem etiqueta própria:
+  //   data-relatorio-index="crmRelatorioClientesProgramaFidelidade"
+  // e não pede filtro nenhum. Mirar nele, e só nele.
+  let botao = page.locator('button.btnCrmRelatorioVisualizar[data-relatorio-index="crmRelatorioClientesProgramaFidelidade"]').first();
+  if (await botao.count() === 0) botao = page.locator('button.btnCrmRelatorioVisualizar[data-relatorio-nome*="idelidade"]').first();
+  if (await botao.count() === 0) throw new Error('Não achei o botão do relatório de fidelidade no CRM (data-relatorio-index=crmRelatorioClientesProgramaFidelidade). Botões vistos: ' + JSON.stringify(raioX));
+  log('pontos: botão escolhido =', await botao.getAttribute('data-relatorio-nome'));
 
   const [popup] = await Promise.all([
     page.waitForEvent('popup', { timeout: 15000 }).catch(() => null),
