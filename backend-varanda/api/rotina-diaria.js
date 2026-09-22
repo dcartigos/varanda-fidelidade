@@ -240,6 +240,26 @@ module.exports = async function handler(req, res) {
       }),
     });
 
+    // 22/09/2026 -- E AVISA NO TELEGRAM.
+    // Gravar numa tabela que ninguem abre E uma recusa silenciosa. De 15 a
+    // 22/09 esta rotina se bloqueou todo dia e ninguem soube: o Lucas so
+    // descobriu 8 dias depois, perguntando. Uma rotina que se recusa a rodar
+    // tem a obrigacao de dizer isso para uma pessoa, no mesmo dia.
+    // Se o aviso falhar, nao muda nada: o bloqueio ja aconteceu e esta certo.
+    try {
+      await enviarTelegram(
+        'VARANDA - ROTINA DAS 15h BLOQUEADA (' + hojeBR + ')\n\n'
+        + 'Nao mandei pontos para cliente nenhum, nem o relatorio de '
+        + 'fechamento. Motivo: o Coletor nao declarou a coleta de hoje como '
+        + 'completa, entao os numeros do dia nao existem ou nao sao confiaveis.\n\n'
+        + 'Isso NAO e um erro do servidor -- e a trava funcionando. Enviar '
+        + 'agora seria mandar saldo errado para cliente.\n\n'
+        + 'O QUE FAZER: rodar o Coletor no PC do Varanda. Assim que ele '
+        + 'terminar, abrir /api/rotina-diaria de novo (a idempotencia impede '
+        + 'envio duplicado).'
+      );
+    } catch (e) { /* o aviso e acessorio, nunca derruba a rotina */ }
+
     return responder(res, 200, resultado);
   }
 
