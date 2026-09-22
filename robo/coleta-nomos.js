@@ -306,18 +306,35 @@ function extrairBuffet(produtos) {
 // Colunas conhecidas: Código, Nome, Telefone, Pontos prog. fidelidade.
 // Acho as colunas pelo cabeçalho, com esses índices como reserva.
 // O telefone vai COMO ESTÁ — quem normaliza é o servidor (nono dígito, 0800...).
-async function lerPontos(page) {
+async function lerPontos(pageInicial) {
+  let page = pageInicial;
   await page.goto(NOMOS + '/app/varanda/crm', { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForSelector('button.btnCrmRelatorioVisualizar', { timeout: 30000 });
 
   // Há um botão por relatório; quero o da linha "Programa de Fidelidade".
-  const clicou = await page.evaluate(() => {
-    const botoes = [...document.querySelectorAll('button.btnCrmRelatorioVisualizar')];
-    const alvo = botoes.find((b) => /fidelidade/i.test((b.closest('tr') || b.parentElement).innerText)) || botoes[0];
-    if (!alvo) return false;
-    alvo.click(); return true;
-  });
-  if (!clicou) throw new Error('Não achei o botão do relatório de fidelidade no CRM.');
+  // 22/09/2026 (2a rodada real): o clique não abriu nada NA MESMA ABA -- nem
+  // tabela, nem modal. Ou seja, o relatório abre numa ABA NOVA (window.open) e
+  // o robô ficava olhando a aba velha. Agora o clique é um clique de verdade
+  // do Playwright, e o robô espera até 15s por uma aba nova; se vier, segue
+  // nela; se não vier, continua na atual.
+  let botao = page.locator('tr', { hasText: /fidelidade/i }).locator('button.btnCrmRelatorioVisualizar').first();
+  if (await botao.count() === 0) botao = page.locator('button.btnCrmRelatorioVisualizar').first();
+  if (await botao.count() === 0) throw new Error('Não achei o botão do relatório de fidelidade no CRM.');
+
+  const [popup] = await Promise.all([
+    page.waitForEvent('popup', { timeout: 15000 }).catch(() => null),
+    botao.click(),
+  ]);
+  let alvo = page;
+  if (popup) {
+    await popup.waitForLoadState('domcontentloaded').catch(() => {});
+    alvo = popup;
+    log('pontos: relatório abriu em aba nova ->', popup.url());
+  } else {
+    log('pontos: nenhuma aba nova; procurando a tabela na aba atual');
+  }
+  // Daqui para baixo, "page" é a aba onde o relatório está.
+  page = alvo;
 
   // 22/09/2026: na 1a rodada real a tabela não ficou VISÍVEL em 30s e o robô
   // morreu aqui. O relatório tem ~500 linhas e pode abrir dentro de um modal
