@@ -319,8 +319,31 @@ async function lerPontos(page) {
   });
   if (!clicou) throw new Error('Não achei o botão do relatório de fidelidade no CRM.');
 
-  await page.waitForSelector('#tabelaRelatorio', { timeout: 30000 });
-  await page.waitForFunction(() => window.jQuery && jQuery.fn.DataTable && jQuery.fn.DataTable.isDataTable('#tabelaRelatorio'), null, { timeout: 30000 });
+  // 22/09/2026: na 1a rodada real a tabela não ficou VISÍVEL em 30s e o robô
+  // morreu aqui. O relatório tem ~500 linhas e pode abrir dentro de um modal
+  // ou demorar para carregar. Agora: espera até 90s, aceita a tabela existir
+  // no DOM (não precisa estar visível), espera o DataTables ter LINHAS, e se
+  // ainda assim falhar, descreve a tela no erro para a próxima correção ser
+  // certeira em vez de chute.
+  const descreverTela = () => page.evaluate(() => ({
+    url: location.href,
+    tem_tabela: !!document.querySelector('#tabelaRelatorio'),
+    linhas_tabela: document.querySelectorAll('#tabelaRelatorio tbody tr').length,
+    modais_visiveis: [...document.querySelectorAll('.modal, .jconfirm, .swal2-container')]
+      .filter((m) => m.offsetParent !== null).map((m) => m.innerText.trim().replace(/\s+/g, ' ').slice(0, 160)),
+    tabelas: [...document.querySelectorAll('table[id]')].map((t) => t.id + '(' + t.querySelectorAll('tbody tr').length + ')').slice(0, 10),
+    texto: document.body.innerText.replace(/\s+/g, ' ').slice(0, 300),
+  })).catch(() => ({}));
+
+  try {
+    await page.waitForSelector('#tabelaRelatorio', { state: 'attached', timeout: 90000 });
+    await page.waitForFunction(() => window.jQuery && jQuery.fn.DataTable
+      && jQuery.fn.DataTable.isDataTable('#tabelaRelatorio')
+      && jQuery('#tabelaRelatorio').DataTable().rows().count() > 0, null, { timeout: 90000 });
+  } catch (e) {
+    const tela = await descreverTela();
+    throw new Error('Relatório de fidelidade não carregou. Tela: ' + JSON.stringify(tela));
+  }
   await dorme(1500);
 
   const clientes = await page.evaluate(() => {
