@@ -402,7 +402,13 @@ module.exports = async function handler(req, res) {
     previa: seco ? completo : undefined,
   };
 
-  if (!seco) {
+  // 22/09/2026 -- DECISAO DO LUCAS: o fechamento para a EQUIPE vai SO por
+  // Telegram. O WhatsApp para os gestores foi desligado: custava mensagem,
+  // caia fora da janela de 24h da Meta quase todo dia (131047) e chegava em
+  // duplicidade com o Telegram. O WhatsApp fica so para CLIENTE (pontos).
+  // Para religar, trocar `false &&` por nada. A lista EQUIPE fica como
+  // documentacao de quem recebe o relatorio (no Telegram, via TELEGRAM_CHAT_ID).
+  if (false && !seco) {
     for (const p of EQUIPE) {
       const texto = p.completo ? completo :
         '*VARANDA — ' + hojeBR + '*\n\n' + blocoClientes +
