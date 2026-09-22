@@ -383,10 +383,18 @@ async function lerPontos(page) {
     // 0 — login
     detalhe.passo = 'login';
     let cookie = '';
-    try { cookie = await login(page); } catch (e) { return falhar('login', e); }
+    try { cookie = await login(page); } catch (e) {
+      const ini = await coleta({ acao: 'inicio' }).catch(() => null);
+      execucaoId = ini && ini.ok && ini.corpo ? ini.corpo.execucao_id : null;
+      return falhar('login', e);
+    }
     if (SO_TESTAR_LOGIN) {
-      log('SO_TESTAR_LOGIN=1: login funcionou, parando aqui sem gravar nada.');
-      await telegram('VARANDA - teste do robo: LOGIN NO NOMOS FUNCIONOU (' + hoje + '). Nada foi gravado.');
+      log('SO_TESTAR_LOGIN=1: login funcionou, parando aqui sem coletar nada.');
+      // Deixa um registro em execucoes_log (só isso) para quem confere pelo banco.
+      const ini = await coleta({ acao: 'inicio' });
+      const id = ini.ok && ini.corpo && ini.corpo.execucao_id;
+      if (id) await coleta({ acao: 'fechar_log', execucao_id: id, sucesso: true, mensagem: 'robô: TESTE DE LOGIN OK (nada coletado)' });
+      await telegram('VARANDA - teste do robo: LOGIN NO NOMOS FUNCIONOU (' + hoje + '). Nada foi coletado.');
       await browser.close(); return;
     }
 

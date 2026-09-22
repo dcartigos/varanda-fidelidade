@@ -30,6 +30,13 @@ name: coleta nomos 14h
 on:
   schedule:
     - cron: '0 17 * * 1-6'
+  # ARQUIVO-GATILHO: subir robo/RODAR_AGORA.txt dispara uma rodada na hora.
+  # Conteúdo "login" = só testa o login; qualquer outra coisa = coleta real.
+  # Existe porque quem mantém o robô (o Claude) não clica no site do GitHub,
+  # mas consegue fazer commit. Assim o teste e a correção acontecem sem o Lucas.
+  push:
+    paths:
+      - 'robo/RODAR_AGORA.txt'
   workflow_dispatch:
     inputs:
       so_testar_login:
@@ -65,5 +72,13 @@ jobs:
           NOMOS_SENHA: ${{ secrets.NOMOS_SENHA }}
           VARANDA_TOKEN: ${{ secrets.VARANDA_TOKEN }}
           BACKEND: https://varanda-backend.vercel.app
-          SO_TESTAR_LOGIN: ${{ inputs.so_testar_login == true && '1' || '0' }}
-        run: node coleta-nomos.js
+        run: |
+          MODO="coleta"
+          if [ "${{ github.event_name }}" = "push" ]; then
+            MODO="$(tr -d '[:space:]' < RODAR_AGORA.txt 2>/dev/null || echo coleta)"
+          elif [ "${{ inputs.so_testar_login }}" = "true" ]; then
+            MODO="login"
+          fi
+          echo "modo: $MODO (evento: ${{ github.event_name }})"
+          if [ "$MODO" = "login" ]; then export SO_TESTAR_LOGIN=1; else export SO_TESTAR_LOGIN=0; fi
+          node coleta-nomos.js
