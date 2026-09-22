@@ -310,6 +310,27 @@ async function lerPontos(pageInicial) {
   let page = pageInicial;
   await page.goto(NOMOS + '/app/varanda/crm', { waitUntil: 'domcontentloaded', timeout: 60000 });
   await page.waitForSelector('button.btnCrmRelatorioVisualizar', { timeout: 30000 });
+  // 22/09/2026: o botão existe no HTML antes do JavaScript da página "ligar"
+  // o clique nele. Um humano clica segundos depois; o robô clicava no mesmo
+  // instante e o clique caía no vazio. Espera a rede sossegar + 3s.
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await dorme(3000);
+
+  // Raio-X da tela ANTES do clique: como são os botões e a linha do relatório.
+  const raioX = await page.evaluate(() => {
+    const bs = [...document.querySelectorAll('button.btnCrmRelatorioVisualizar')];
+    return bs.slice(0, 6).map((b) => ({
+      attrs: [...b.attributes].map((a) => a.name + '=' + String(a.value).slice(0, 60)).join(' '),
+      linha: (b.closest('tr, li, .row, .card, div') || b.parentElement).innerText.replace(/\s+/g, ' ').slice(0, 120),
+      onclick: (b.getAttribute('onclick') || '').slice(0, 120),
+    }));
+  }).catch(() => []);
+  log('pontos: botões do CRM =', JSON.stringify(raioX));
+
+  // Escuta o que a página pede na rede depois do clique (só URLs, sem corpo).
+  const pedidosRede = [];
+  const ouvinte = (req) => { const u = req.url(); if (/nomosmenu/.test(u) && !/\.(png|jpg|css|js|woff2?|svg|gif)(\?|$)/.test(u)) pedidosRede.push(req.method() + ' ' + u.slice(0, 140)); };
+  page.on('request', ouvinte);
 
   // Há um botão por relatório; quero o da linha "Programa de Fidelidade".
   // 22/09/2026 (2a rodada real): o clique não abriu nada NA MESMA ABA -- nem
@@ -359,7 +380,8 @@ async function lerPontos(pageInicial) {
       && jQuery('#tabelaRelatorio').DataTable().rows().count() > 0, null, { timeout: 90000 });
   } catch (e) {
     const tela = await descreverTela();
-    throw new Error('Relatório de fidelidade não carregou. Tela: ' + JSON.stringify(tela));
+    throw new Error('Relatório de fidelidade não carregou. Tela: ' + JSON.stringify(tela)
+      + ' | botões: ' + JSON.stringify(raioX) + ' | rede após clique: ' + JSON.stringify(pedidosRede.slice(0, 12)));
   }
   await dorme(1500);
 
