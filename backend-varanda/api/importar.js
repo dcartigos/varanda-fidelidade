@@ -67,7 +67,16 @@ function responder(res, status, corpo) {
 /** "R$ 1.234,56" -> 1234.56 · "" -> null */
 function valorParaNumero(txt) {
   if (!txt) return null;
-  const limpo = String(txt).replace(/[^\d,.-]/g, '').replace(/\./g, '').replace(',', '.');
+  // BUG 23/09/2026: o Nomos passou a mostrar "12.10" (ponto decimal) em vez de
+  // "12,10". O codigo antigo apagava TODO ponto e gravava 1210 (100x maior):
+  // o fechamento de 23/09 saiu com R$ 212.423,00. Agora:
+  //   tem virgula  -> formato BR  "1.234,56" -> 1234.56
+  //   so ponto com 1-2 casas no fim -> decimal "12.10" -> 12.10
+  //   so ponto com 3 casas -> milhar "1.234" -> 1234
+  let limpo = String(txt).replace(/[^\d,.-]/g, '');
+  if (limpo.includes(',')) limpo = limpo.replace(/\./g, '').replace(',', '.');
+  else if (/\.\d{1,2}$/.test(limpo)) limpo = limpo.replace(/\.(?=.*\.)/g, '');
+  else limpo = limpo.replace(/\./g, '');
   const n = parseFloat(limpo);
   return isNaN(n) ? null : n;
 }

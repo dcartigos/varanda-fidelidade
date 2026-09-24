@@ -325,11 +325,27 @@ module.exports = async function handler(req, res) {
     const dataBR = String(data.getUTCDate()).padStart(2, '0') + '/' +
                    String(data.getUTCMonth() + 1).padStart(2, '0') + '/' + data.getUTCFullYear();
     if (seco) { resultado.pontos.detalhe.push(tel + ' (simulado)'); continue; }
+    // Dois templates novos (24/09, pedido do Lucas), escolhidos pelo saldo:
+    //   >= 100 pontos -> agradecimento_pontos_resgate:    {{1}} reais, {{2}} pontos, {{3}} pedido, {{4}} data
+    //   <  100 pontos -> agradecimento_pontos_acumulando: {{1}} pontos, {{2}} faltam, {{3}} pedido, {{4}} data
+    // Liga com TEMPLATE_PONTOS=agradecimento no Vercel. Sem a variavel = antigo.
+    const pts = Number(saldos[tel]) || 0;
+    const usarNovo = String(process.env.TEMPLATE_PONTOS || '').trim() === 'agradecimento';
+    let tplPontos = 'atualizacao_cadastro_pontos';
+    let parametrosPontos = [String(p.codigo), dataBR, String(saldos[tel])];
+    if (usarNovo && pts >= 100) {
+      tplPontos = 'agradecimento_pontos_resgate';
+      const reais = (Math.floor(pts / 100) * 10).toFixed(2).replace('.', ',');
+      parametrosPontos = [reais, String(pts), String(p.codigo), dataBR];
+    } else if (usarNovo) {
+      tplPontos = 'agradecimento_pontos_acumulando';
+      parametrosPontos = [String(pts), String(100 - pts), String(p.codigo), dataBR];
+    }
     const r = await enviar({
       telefone: tel,
-      template: 'atualizacao_cadastro_pontos',
+      template: tplPontos,
       idioma: 'pt_BR',
-      parametros: [String(p.codigo), dataBR, String(saldos[tel])],
+      parametros: parametrosPontos,
       chave: 'pontos|' + tel + '|' + hoje,
       forcar: true,
     });
