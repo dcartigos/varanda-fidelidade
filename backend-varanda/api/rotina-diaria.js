@@ -195,6 +195,23 @@ module.exports = async function handler(req, res) {
 
   const resultado = { dia: hoje, seco, pontos: {}, fechamento: {} };
 
+  // 24/09/2026 -- UMA VEZ POR DIA. O relatorio da equipe vai por Telegram, que
+  // nao tem chave de idempotencia. Se a rotina rodar duas vezes (cron das 15h
+  // + robo atrasado, por exemplo) o fechamento chegaria duas vezes. Agora a
+  // rotina grava em execucoes_log quando envia, e recusa a segunda rodada do
+  // dia. ?forcar=1 passa por cima -- e o que se usa para REENVIAR corrigido.
+  const forcarRotina = req.query && (req.query.forcar === '1' || req.query.forcar === 'true');
+  if (!seco && !forcarRotina) {
+    const jaFoi = await sb('/execucoes_log?select=id,iniciado_em&rotina=eq.rotina-diaria&sucesso=is.true'
+      + '&iniciado_em=gte.' + encodeURIComponent(hoje + 'T00:00:00-03:00') + '&limit=1');
+    if (jaFoi.ok && Array.isArray(jaFoi.corpo) && jaFoi.corpo.length) {
+      return responder(res, 200, {
+        dia: hoje, ja_enviado_hoje: true, quando: jaFoi.corpo[0].iniciado_em,
+        aviso: 'A rotina de hoje ja enviou pontos e fechamento. Nada foi feito. Para reenviar (ex.: numero corrigido), use &forcar=1.',
+      });
+    }
+  }
+
   // =========================================================================
   // TRAVA DO CONTRATO DE COLETA — adicionada em 24/08/2026
   // =========================================================================
@@ -452,6 +469,20 @@ module.exports = async function handler(req, res) {
   if (!seco) {
     const tg = await enviarTelegram(completo);
     resultado.telegram = { enviado: !!tg.ok, erro: tg.erro || null };
+
+    // Registro do envio: e isto que a guarda la em cima consulta, e e o unico
+    // lugar onde da para conferir pelo banco se o Telegram foi.
+    await sb('/execucoes_log', {
+      method: 'POST',
+      body: JSON.stringify({
+        rotina: 'rotina-diaria', sucesso: true,
+        terminado_em: new Date().toISOString(),
+        enviados: (resultado.pontos && resultado.pontos.enviados) || 0,
+        falhados: (resultado.pontos && resultado.pontos.recusados) || 0,
+        mensagem: 'enviado' + (forcarRotina ? ' (forcado/reenvio)' : '') + ': pontos=' + ((resultado.pontos && resultado.pontos.enviados) || 0)
+          + ' telegram=' + (tg.ok ? 'ok' : ('FALHOU ' + (tg.erro || ''))),
+      }),
+    }).catch(() => {});
   }
 
   // ⚠️ 'enviados' aqui significa ACEITO PELA META, não entregue.

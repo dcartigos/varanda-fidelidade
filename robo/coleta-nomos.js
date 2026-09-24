@@ -537,6 +537,18 @@ async function lerPontos(pageInicial) {
       log('nomos-sessao:', rs ? rs.status : 'falhou', rs && rs.corpo && rs.corpo.teste_imediato);
     }
 
+    // 6b — 24/09/2026: se ja passou das 15h de Brasilia, o cron da rotina ja
+    // rodou e se bloqueou (a coleta nao existia). O GitHub atrasou 3h21 em
+    // 24/09. Entao o robo chama a rotina ele mesmo. E seguro: os pontos tem
+    // chave de idempotencia e a rotina recusa rodar duas vezes no mesmo dia.
+    detalhe.passo = 'rotina';
+    if (detalhe.completa && agoraBR().getUTCHours() >= 15) {
+      const rr = await backend('/api/rotina-diaria', null, 'GET').catch(() => null);
+      detalhe.rotina_chamada = rr ? { status: rr.status, ja_enviado_hoje: rr.corpo && rr.corpo.ja_enviado_hoje,
+        pontos: rr.corpo && rr.corpo.pontos && rr.corpo.pontos.enviados, telegram: rr.corpo && rr.corpo.telegram } : 'falhou';
+      log('rotina-diaria chamada pelo robô:', JSON.stringify(detalhe.rotina_chamada));
+    }
+
     // 7 — fechar e avisar
     detalhe.passo = 'fim';
     detalhe.segundos = Math.round((Date.now() - inicio) / 1000);
@@ -547,7 +559,7 @@ async function lerPontos(pageInicial) {
       + 'Saldos de pontos gravados: ' + detalhe.pontos_gravados + '\n'
       + 'Kg/buffet: ' + (buffetOk ? ('kg ' + detalhe.buffet.kg + ' · livre ' + (detalhe.buffet.livre_qtd || 0)) : ('NAO -> ' + buffetMotivo)) + '\n'
       + (detalhe.completa
-        ? 'Pontos e fechamento saem as 15h sozinhos.'
+        ? (detalhe.rotina_chamada ? ('Rotina dos pontos chamada agora: ' + JSON.stringify(detalhe.rotina_chamada)) : 'Pontos e fechamento saem as 15h sozinhos.')
         : 'Coleta NAO marcada como completa (faltou: ' + JSON.stringify(detalhe.faltando) + '). As 15h NAO vai enviar.');
     await telegram(linha);
     log(linha);

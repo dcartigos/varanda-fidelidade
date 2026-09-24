@@ -29,7 +29,12 @@ name: coleta nomos 14h
 
 on:
   schedule:
+    # 24/09/2026: o GitHub atrasou 3h21 num dia. Tres horarios (14h00, 14h20,
+    # 14h40 Brasilia) para pelo menos um cair antes das 15h. Rodar mais de uma
+    # vez e seguro: pedidos, saldos e buffet sao gravados por cima, iguais.
     - cron: '0 17 * * 1-6'
+    - cron: '20 17 * * 1-6'
+    - cron: '40 17 * * 1-6'
   # ARQUIVO-GATILHO: subir robo/RODAR_AGORA.txt dispara uma rodada na hora.
   # Conteúdo "login" = só testa o login; qualquer outra coisa = coleta real.
   # Existe porque quem mantém o robô (o Claude) não clica no site do GitHub,
