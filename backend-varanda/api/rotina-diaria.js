@@ -341,7 +341,13 @@ module.exports = async function handler(req, res) {
     const data = new Date(p.data_hora_pedido);
     const dataBR = String(data.getUTCDate()).padStart(2, '0') + '/' +
                    String(data.getUTCMonth() + 1).padStart(2, '0') + '/' + data.getUTCFullYear();
-    if (seco) { resultado.pontos.detalhe.push(tel + ' (simulado)'); continue; }
+    if (seco) {
+      const ptsSeco = Number(saldos[tel]) || 0;
+      const novoSeco = String(process.env.TEMPLATE_PONTOS || '').trim() === 'agradecimento';
+      const tplSeco = novoSeco ? (ptsSeco >= 100 ? 'agradecimento_pontos_resgate' : 'agradecimento_pontos_acumulando') : 'atualizacao_cadastro_pontos';
+      resultado.pontos.detalhe.push(tel + ' (simulado · ' + ptsSeco + ' pts · ' + tplSeco + ')');
+      continue;
+    }
     // Dois templates novos (24/09, pedido do Lucas), escolhidos pelo saldo:
     //   >= 100 pontos -> agradecimento_pontos_resgate:    {{1}} reais, {{2}} pontos, {{3}} pedido, {{4}} data
     //   <  100 pontos -> agradecimento_pontos_acumulando: {{1}} pontos, {{2}} faltam, {{3}} pedido, {{4}} data

@@ -41,12 +41,22 @@ module.exports = async function handler(req, res) {
 
   const agora = new Date();
   const chave = 'teste|' + telefone + '|' + agora.toISOString();
+  const dataBR = new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10).split('-').reverse().join('/');
+
+  // 25/09/2026: ?template= escolhe qual testar. Valores obviamente de teste.
+  //   agradecimento_pontos_resgate    -> [reais, pontos, pedido, data]
+  //   agradecimento_pontos_acumulando -> [pontos, faltam, pedido, data]
+  //   (padrao) atualizacao_cadastro_pontos -> [pedido, data, saldo]
+  const template = String((req.query && req.query.template) || 'atualizacao_cadastro_pontos').trim();
+  let parametros = ['TESTE', dataBR, '0'];
+  if (template === 'agradecimento_pontos_resgate') parametros = ['20,00', '215', 'TESTE', dataBR];
+  else if (template === 'agradecimento_pontos_acumulando') parametros = ['45', '55', 'TESTE', dataBR];
 
   const r = await enviarMensagem({
     telefone,
-    template: 'atualizacao_cadastro_pontos',
+    template,
     idioma: 'pt_BR',
-    parametros: ['TESTE', agora.toLocaleDateString('pt-BR'), '0'],
+    parametros,
     chave,
     forcar: true,
   });
