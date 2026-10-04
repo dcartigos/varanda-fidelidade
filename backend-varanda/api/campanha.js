@@ -59,6 +59,15 @@ const DONO = '+5544999691829';
 // fixo no rodapé. Não repetir isso na legenda.
 //
 // ATENÇÃO 4: emoji em toda mensagem -- regra do Lucas, 22/08/2026.
+// Legenda da campanha especial. Uma linha só (a Meta recusa quebra de linha
+// no parâmetro). Emojis em escape pelo mesmo motivo do bloco EMOJI abaixo.
+function legendaBuffetLivre(diaNome, data) {
+  return '\u{1F37D}\u{FE0F} *Hoje, ' + diaNome + ' (' + data + '), é dia de BUFFET LIVRE no Varanda!* '
+    + 'Homens R$ 49,90 e mulheres R$ 44,90, com sobremesa grátis \u{1F370} e 10% de cashback '
+    + 'sobre o valor da conta. Veio de uniforme da empresa? \u{1F454} Ganhe mais 10% de desconto! '
+    + '\u{23F0} Das 11h às 14h \u{1F4CD} Rua Manoel Ribas, 625 - Centro. Te esperamos! \u{1F60B}';
+}
+
 const ARTES = {
   arte_01_almoco: {
     imagem: RAW + 'arte_01_almoco_v1.jpg',
@@ -83,6 +92,12 @@ const ARTES = {
   },
   // EXTRA de sexta e sábado. Pode repetir na mesma semana de propósito:
   // é o produto de maior ticket e só existe nesses dois dias.
+  // CAMPANHA ESPECIAL BUFFET LIVRE (04/10/2026, pedido do Lucas). Seg/ter/qua,
+  // cada dia para 1/3 da base, lista congelada na tabela campanha_especial.
+  // NÃO entram na rotação: só saem quando a tabela tem linha para o dia.
+  buffet_livre_seg: { imagem: RAW + 'buffet_livre_seg_0510.jpg', legenda: legendaBuffetLivre('segunda', '05/10'), dias: [1], especial: true },
+  buffet_livre_ter: { imagem: RAW + 'buffet_livre_ter_0610.jpg', legenda: legendaBuffetLivre('terça', '06/10'), dias: [2], especial: true },
+  buffet_livre_qua: { imagem: RAW + 'buffet_livre_qua_0710.jpg', legenda: legendaBuffetLivre('quarta', '07/10'), dias: [3], especial: true },
   arte_10_feijoada: {
     imagem: RAW + 'kit_feijoada_v4.jpg',
     legenda: 'Kit Feijoada Especial: feijoada completa, pronta pra servir na '
@@ -358,6 +373,29 @@ module.exports = async (req, res) => {
   let legenda = q.legenda || null;
   let origem = arteId ? 'pedido na URL' : null;
 
+  // ---- CAMPANHA ESPECIAL (04/10/2026) -------------------------------------
+  // Se a tabela campanha_especial tem linha para hoje, ela MANDA no dia: sem
+  // cardápio, sem rotação, sem porcentagem. A lista do dia foi congelada na
+  // hora de criar a campanha, então ninguém recebe duas vezes e cada pessoa
+  // recebe a arte com a data certa. fila_especial() já tira quem pediu SAIR
+  // depois e quem a Meta já aceitou -- o cron das 10h20/10h50 só completa.
+  // &simular_dia=AAAA-MM-DD (só com seco=1) permite conferir antes do dia.
+  const diaEspecial = (seco && /^\d{4}-\d{2}-\d{2}$/.test(String(q.simular_dia || '')))
+    ? String(q.simular_dia) : hoje;
+  let especial = null;
+  if (!arteId && !imagem) {
+    const tem = await sb('/campanha_especial?select=campanha,arte&dia=eq.' + diaEspecial + '&limit=1');
+    if (tem.ok && Array.isArray(tem.corpo) && tem.corpo[0] && ARTES[tem.corpo[0].arte]) {
+      const fe = await sb('/rpc/fila_especial', { method: 'POST', body: JSON.stringify({ p_dia: diaEspecial }) });
+      especial = {
+        campanha: tem.corpo[0].campanha, dia: diaEspecial,
+        fila: fe.ok && Array.isArray(fe.corpo) ? fe.corpo : null,
+      };
+      arteId = tem.corpo[0].arte;
+      origem = 'campanha especial ' + especial.campanha + ' (' + diaEspecial + ')';
+    }
+  }
+
   if (!arteId && !imagem) {
     const c = await sb('/cardapio_dia?data_ref=eq.' + hoje + '&select=urls_artes,pratos&limit=1');
     const linha = c.ok && Array.isArray(c.corpo) && c.corpo[0] ? c.corpo[0] : null;
@@ -418,6 +456,24 @@ module.exports = async (req, res) => {
     });
   }
 
+  let jaEnviadosHoje = 0, baseTotal = null, ehExtra = false, pct = null;
+  let alvoDoDia = 0, limite = 0, f = { corpo: [] }, fila = [];
+  const tel13 = (p) => {
+    const n = normalizarTelefone(p.telefone_e164);
+    return n.ok && n.e164.replace(/\D/g, '').length === 13;
+  };
+
+  if (especial) {
+    if (!Array.isArray(especial.fila)) {
+      return res.status(500).json({ erro: 'Falha ao montar a fila da campanha especial.', arte: arteId });
+    }
+    const tb = await sb('/rpc/base_elegivel_total', { method: 'POST', body: '{}' });
+    baseTotal = Number(tb.corpo) || null;
+    f = { corpo: especial.fila };
+    fila = especial.fila.filter(tel13);
+    alvoDoDia = fila.length;
+    limite = fila.length;
+  } else {
   // ---- QUANTO DESTA ARTE JÁ SAIU HOJE, DE VERDADE -------------------------
   // Conta só o que a Meta ACEITOU (http < 300). Recusa não conta como enviado.
   //
@@ -427,7 +483,7 @@ module.exports = async (req, res) => {
   // "já saiu hoje, não manda mais", as 51 que faltaram ficariam perdidas.
   // Contando só os aceitos, o cron de repescagem completa o que faltou -- e se
   // nada saiu, ele refaz o disparo inteiro.
-  let jaEnviadosHoje = 0;
+  jaEnviadosHoje = 0;
   if (!seco) {
     const j = await sb('/envios?select=telefone_e164'
       + '&arte=eq.' + encodeURIComponent(arteId)
@@ -439,21 +495,21 @@ module.exports = async (req, res) => {
 
   // ---- Tamanho do lote ----------------------------------------------------
   const t = await sb('/rpc/base_elegivel_total', { method: 'POST', body: '{}' });
-  const baseTotal = Number(t.corpo);
+  baseTotal = Number(t.corpo);
   if (!baseTotal || baseTotal < 1) {
     return res.status(500).json({ erro: 'Não consegui ler o tamanho da base.', resposta: t });
   }
 
-  const ehExtra = Boolean(arte.extra);
-  const pct = q.pct != null ? Number(q.pct) : (ehExtra ? PCT_FEIJOADA : PCT_DIARIA);
-  const alvoDoDia = q.limite != null
+  ehExtra = Boolean(arte.extra);
+  pct = q.pct != null ? Number(q.pct) : (ehExtra ? PCT_FEIJOADA : PCT_DIARIA);
+  alvoDoDia = q.limite != null
     ? Math.max(0, Number(q.limite))
     : Math.max(1, Math.round(baseTotal * pct / 100));
 
   // O lote de agora é o que FALTA para fechar o alvo do dia. Numa execução
   // limpa, jaEnviadosHoje = 0 e isto é o alvo inteiro. Numa repescagem depois
   // de falha parcial, é só o buraco -- não manda a leva toda de novo.
-  const limite = forcar ? alvoDoDia : Math.max(0, alvoDoDia - jaEnviadosHoje);
+  limite = forcar ? alvoDoDia : Math.max(0, alvoDoDia - jaEnviadosHoje);
 
   if (!seco && limite === 0) {
     return res.status(409).json({
@@ -467,7 +523,7 @@ module.exports = async (req, res) => {
   }
 
   // ---- A fila -------------------------------------------------------------
-  const f = await sb('/rpc/fila_campanha', {
+  f = await sb('/rpc/fila_campanha', {
     method: 'POST',
     body: JSON.stringify({
       p_arte: arteId,
@@ -481,10 +537,20 @@ module.exports = async (req, res) => {
     return res.status(500).json({ erro: 'Falha ao montar a fila.', resposta: f });
   }
 
-  const fila = f.corpo.filter((p) => {
+  fila = f.corpo.filter((p) => {
     const n = normalizarTelefone(p.telefone_e164);
     return n.ok && n.e164.replace(/\D/g, '').length === 13;
   });
+  }
+
+  // &teste_para=+55... (só com token): manda a arte do dia só para esse número.
+  // Serve para o Lucas ver no celular exatamente o que o cliente vai receber.
+  if (q.teste_para && porToken) {
+    const n = normalizarTelefone(String(q.teste_para));
+    if (!n.ok) return res.status(400).json({ erro: 'teste_para inválido.' });
+    fila = [{ telefone_e164: n.e164 }];
+    origem = (origem || '') + ' · TESTE só para ' + n.e164.slice(-4);
+  }
 
   const resumo = {
     data: hoje,
@@ -552,7 +618,14 @@ module.exports = async (req, res) => {
   const falhas = [];
   let saldoAcabou = false;
 
+  // 04/10/2026: lotes de ~300 (campanha especial) podem passar dos 300s da
+  // função. Para em 260s e devolve o parcial; o cron seguinte completa, porque
+  // a fila só traz quem ainda não teve envio aceito.
+  const prazoMs = Date.now() + 260000;
+  let cortadoPorTempo = false;
+
   for (const pessoa of fila) {
+    if (Date.now() > prazoMs) { cortadoPorTempo = true; break; }
     const tel = normalizarTelefone(pessoa.telefone_e164).e164;
     const chave = ('camp:' + hoje + ':' + arteId + ':' + tel).slice(0, 128);
 
@@ -660,6 +733,7 @@ module.exports = async (req, res) => {
     falhas: falhas.length,
     saldo_ycloud_usd: saldo,
     saldo_acabou: saldoAcabou,
+    cortado_por_tempo: cortadoPorTempo,
     nao_tentados: saldoAcabou ? fila.length - enviados.length - falhas.length : 0,
     custo_estimado_usd: Number((enviados.length * 0.0625).toFixed(4)),
     detalhe_falhas: falhas.slice(0, 15),
