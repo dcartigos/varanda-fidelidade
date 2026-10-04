@@ -396,6 +396,13 @@ module.exports = async (req, res) => {
     }
   }
 
+  // ?so_especial=1 -- usado pelos crons das 9h (04/10/2026, pedido do Lucas:
+  // campanha especial começa 9h). Em dia SEM campanha especial não faz nada,
+  // para não antecipar a rotação normal para antes do cardápio da Maria.
+  if ((q.so_especial === '1' || q.so_especial === true) && !especial) {
+    return res.status(200).json({ data: hoje, aviso: 'Sem campanha especial hoje. Nada a fazer neste horário.' });
+  }
+
   if (!arteId && !imagem) {
     const c = await sb('/cardapio_dia?data_ref=eq.' + hoje + '&select=urls_artes,pratos&limit=1');
     const linha = c.ok && Array.isArray(c.corpo) && c.corpo[0] ? c.corpo[0] : null;

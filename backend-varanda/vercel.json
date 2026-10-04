@@ -1,6 +1,8 @@
 {
   "crons": [
     { "path": "/api/rotina-diaria", "schedule": "0 18 * * *" },
+    { "path": "/api/campanha?so_especial=1", "schedule": "0 12 * * 1-3" },
+    { "path": "/api/campanha?so_especial=1", "schedule": "20 12 * * 1-3" },
     { "path": "/api/campanha", "schedule": "0 13 * * 1-6" },
     { "path": "/api/campanha", "schedule": "20 13 * * 1-6" },
     { "path": "/api/campanha", "schedule": "50 13 * * 1-6" },
