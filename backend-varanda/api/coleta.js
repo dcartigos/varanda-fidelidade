@@ -246,6 +246,12 @@ module.exports = async function handler(req, res) {
     const kg = num(c.kg), valorKg = num(c.valor_kg);
     const qtd = num(c.livre_qtd), valorLivre = num(c.livre_valor);
     const problemas = [];
+    // AVISOS nao bloqueiam a coleta (05/10/2026). Buffet livre fora do preco
+    // padrao e NORMAL: promocao, meia-entrada de crianca, cortesia. Em 05/10
+    // uma promocao derrubou a coleta inteira e nenhum relatorio saiu - o preco
+    // do livre nao justifica isso. O que continua BLOQUEANDO e o kg, onde um
+    // erro de leitura (193 no lugar de 19,3) vira mais de mil reais errados.
+    const avisos = [];
 
     // ⚠️ VALIDAÇÃO EM CÓDIGO, NÃO EM PORTUGUÊS.
     // Antes isso era uma instrução escrita que dependia de alguém conferir.
@@ -266,7 +272,7 @@ module.exports = async function handler(req, res) {
     if (qtd && valorLivre) {
       const porPessoa = valorLivre / qtd;
       if (porPessoa < 35 || porPessoa > 95) {
-        problemas.push('buffet livre: R$ ' + valorLivre.toFixed(2) + ' / ' + qtd +
+        avisos.push('buffet livre: R$ ' + valorLivre.toFixed(2) + ' / ' + qtd +
           ' pessoas = R$ ' + porPessoa.toFixed(2) + ' por pessoa, fora de R$ 35-95 (leitura errada?)');
       }
     }
@@ -296,7 +302,7 @@ module.exports = async function handler(req, res) {
     });
     if (!g.ok) return responder(res, 502, { erro: 'Falha ao gravar buffet.', detalhe: g.corpo });
 
-    await upsertStatus({ buffet_gravado: true });
+    await upsertStatus({ buffet_gravado: true, observacoes: avisos.length ? avisos.join(' | ') : null });
     return responder(res, 200, {
       ok: true, kg, valor_kg: valorKg, livre_qtd: qtd, livre_valor: valorLivre,
       validacao: 'preços conferem',
