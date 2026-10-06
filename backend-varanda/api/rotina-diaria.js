@@ -183,11 +183,25 @@ module.exports = async function handler(req, res) {
     return responder(res, 500, { erro: 'Supabase não configurado.' });
   }
 
-  const agoraBR = new Date(Date.now() - 3 * 3600 * 1000);
+  // 05/10/2026 -- REPROCESSAR UM DIA QUE FICOU PARA TRÁS (só com token, nunca cron)
+  //   &dia=AAAA-MM-DD  -> roda a rotina para aquele dia em vez de hoje
+  //   &so_pontos=1     -> manda só os pontos dos clientes (sem relatório)
+  //   &sem_pontos=1    -> manda só o relatório da equipe (sem pontos)
+  // Nasceu em 05/10: a coleta travou, nada saiu às 15h, e o conserto ficou
+  // pronto às 23h -- o relatório foi na hora e os pontos no dia seguinte, 11h.
+  const qy = req.query || {};
+  const porTokenRot = Boolean(recebido) && aceitos.includes(recebido);
+  const diaParam = (porTokenRot && /^\d{4}-\d{2}-\d{2}$/.test(String(qy.dia || ''))) ? String(qy.dia) : null;
+  const soPontos = porTokenRot && (qy.so_pontos === '1' || qy.so_pontos === 'true');
+  const semPontos = porTokenRot && (qy.sem_pontos === '1' || qy.sem_pontos === 'true');
+
+  const agoraBR = diaParam ? new Date(diaParam + 'T12:00:00Z') : new Date(Date.now() - 3 * 3600 * 1000);
   const hoje = agoraBR.toISOString().slice(0, 10);
   const hojeBR = hoje.split('-').reverse().join('/');
   const diaSemana = DIAS[agoraBR.getUTCDay()];
   const seco = req.query && (req.query.seco === '1' || req.query.seco === 'true');
+  const amanhaISO = new Date(Date.parse(hoje + 'T12:00:00Z') + 86400000).toISOString().slice(0, 10);
+  const nomeRotina = diaParam ? 'rotina-diaria-reprocesso' : 'rotina-diaria';
 
   if (agoraBR.getUTCDay() === 0) {
     return responder(res, 200, { dia: hoje, domingo: true, aviso: 'domingo, restaurante fechado' });
@@ -201,7 +215,7 @@ module.exports = async function handler(req, res) {
   // rotina grava em execucoes_log quando envia, e recusa a segunda rodada do
   // dia. ?forcar=1 passa por cima -- e o que se usa para REENVIAR corrigido.
   const forcarRotina = req.query && (req.query.forcar === '1' || req.query.forcar === 'true');
-  if (!seco && !forcarRotina) {
+  if (!seco && !forcarRotina && !diaParam) {
     const jaFoi = await sb('/execucoes_log?select=id,iniciado_em&rotina=eq.rotina-diaria&sucesso=is.true'
       + '&iniciado_em=gte.' + encodeURIComponent(hoje + 'T00:00:00-03:00') + '&limit=1');
     if (jaFoi.ok && Array.isArray(jaFoi.corpo) && jaFoi.corpo.length) {
@@ -291,6 +305,7 @@ module.exports = async function handler(req, res) {
   const doDia = await sb(
     '/nomos_pedidos?select=codigo,telefone_e164,data_hora_pedido' +
     '&data_hora_pedido=gte.' + encodeURIComponent(hoje + 'T00:00:00-03:00') +
+    '&data_hora_pedido=lt.' + encodeURIComponent(amanhaISO + 'T00:00:00-03:00') +
     '&telefone_valido=is.true&order=data_hora_pedido.desc&limit=500'
   );
   const pedidosHoje = (doDia.ok && Array.isArray(doDia.corpo)) ? doDia.corpo : [];
@@ -322,7 +337,7 @@ module.exports = async function handler(req, res) {
     }
   }
 
-  const alvos = Object.keys(saldos);
+  const alvos = semPontos ? [] : Object.keys(saldos);
   resultado.pontos = {
     clientes_hoje: telefones.length,
     com_saldo: alvos.length,
@@ -375,6 +390,20 @@ module.exports = async function handler(req, res) {
     if (r.aceito) resultado.pontos.enviados++;
     else { resultado.pontos.recusados++; resultado.pontos.detalhe.push(tel + ': ' + r.erro); }
     await new Promise((x) => setTimeout(x, 300));
+  }
+
+  if (soPontos) {
+    if (!seco) {
+      await sb('/execucoes_log', {
+        method: 'POST',
+        body: JSON.stringify({
+          rotina: nomeRotina, sucesso: true, terminado_em: new Date().toISOString(),
+          enviados: resultado.pontos.enviados || 0, falhados: resultado.pontos.recusados || 0,
+          mensagem: 'so pontos, dia ' + hoje + ': enviados=' + (resultado.pontos.enviados || 0),
+        }),
+      }).catch(() => {});
+    }
+    return responder(res, 200, resultado);
   }
 
   // =========================================================================
@@ -481,7 +510,7 @@ module.exports = async function handler(req, res) {
     await sb('/execucoes_log', {
       method: 'POST',
       body: JSON.stringify({
-        rotina: 'rotina-diaria', sucesso: true,
+        rotina: nomeRotina, sucesso: true,
         terminado_em: new Date().toISOString(),
         enviados: (resultado.pontos && resultado.pontos.enviados) || 0,
         falhados: (resultado.pontos && resultado.pontos.recusados) || 0,
