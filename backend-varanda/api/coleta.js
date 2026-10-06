@@ -257,11 +257,17 @@ module.exports = async function handler(req, res) {
           ' kg = R$ ' + precoReal.toFixed(2) + '/kg, esperado ~R$ ' + PRECO_KG.toFixed(2));
       }
     }
+    // 05/10/2026: era "R$ 69,90 por pessoa, ±20%". A promoção da semana
+    // (R$ 49,90 / R$ 44,90) caiu fora disso, o servidor recusou o buffet, a
+    // coleta não fechou e os pontos + fechamento de 05/10 não saíram.
+    // A trava existe para pegar LEITURA ERRADA (10x a mais ou a menos), não
+    // para vigiar preço. Agora aceita qualquer preço por pessoa entre R$ 35 e
+    // R$ 95 -- promoção, dia normal e sábado passam; 10x errado não passa.
     if (qtd && valorLivre) {
-      const esperado = qtd * PRECO_BUFFET_LIVRE;
-      if (Math.abs(valorLivre - esperado) / esperado > TOLERANCIA) {
-        problemas.push('buffet livre: ' + qtd + ' x R$ ' + PRECO_BUFFET_LIVRE.toFixed(2) +
-          ' = R$ ' + esperado.toFixed(2) + ', mas veio R$ ' + valorLivre.toFixed(2));
+      const porPessoa = valorLivre / qtd;
+      if (porPessoa < 35 || porPessoa > 95) {
+        problemas.push('buffet livre: R$ ' + valorLivre.toFixed(2) + ' / ' + qtd +
+          ' pessoas = R$ ' + porPessoa.toFixed(2) + ' por pessoa, fora de R$ 35-95 (leitura errada?)');
       }
     }
 
@@ -359,7 +365,11 @@ module.exports = async function handler(req, res) {
     const faltando = [];
     if (!s.tem_pedidos_de_hoje) faltando.push('pedidos do dia');
     if (!s.clientes_com_saldo) faltando.push('saldo de pontos');
-    if (!s.buffet_gravado) faltando.push('kg / buffet livre');
+    // 05/10/2026: kg/buffet NÃO bloqueia mais. Ele só aparece no relatório da
+    // equipe (que já sabe escrever "(não confirmado)"). Os pontos do cliente
+    // não dependem dele -- e em 05/10 um buffet recusado segurou os pontos de
+    // todo mundo. Pedidos e saldos continuam obrigatórios.
+    const avisoBuffet = s.buffet_gravado ? null : 'kg / buffet livre não confirmados -- relatório sai com "(não confirmado)"';
 
     if (faltando.length) {
       // Não marca completa. Ausência de dado não é zero.
@@ -379,7 +389,7 @@ module.exports = async function handler(req, res) {
     const podeEnviar = v.ok && (v.corpo === true || v.corpo === 'true');
 
     return responder(res, 200, {
-      ok: true, completa: true, pode_enviar: podeEnviar,
+      ok: true, completa: true, pode_enviar: podeEnviar, aviso_buffet: avisoBuffet,
       proximo_passo: podeEnviar
         ? 'Chamar /api/rotina-diaria com &seco=1 para conferir, e depois sem o seco=1 para enviar.'
         : 'coleta_confiavel() deu false. NÃO chame a rotina. Avise o Lucas.',
