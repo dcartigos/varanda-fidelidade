@@ -389,6 +389,33 @@ module.exports = async function handler(req, res) {
     await new Promise((x) => setTimeout(x, 300));
   }
 
+  // 20/10/2026 -- RELATÓRIO SÓ COM AS FORMAS DE PAGAMENTO.
+  // Quem grava as formas de pagamento é o robô do GitHub (que costuma terminar
+  // entre 16h e 20h). Se esta rotina for chamada antes disso (cron das 15h ou
+  // coletor do PC do Varanda), os PONTOS saem na hora -- cliente não espera --
+  // mas o RELATÓRIO fica para quando o robô terminar e chamar de novo. Os pontos
+  // não duplicam (chave pontos|tel|dia). Se o robô não aparecer, a checagem das
+  // 20h30 manda o relatório mesmo sem as formas.
+  let adiarRelatorio = false;
+  if (!diaParam && !semPontos && !soPontos && !forcarRotina && qy.checagem !== '1') {
+    const pgHoje = await sb('/pagamentos_dia?select=forma&dia=eq.' + hoje + '&limit=1');
+    adiarRelatorio = !(pgHoje.ok && Array.isArray(pgHoje.corpo) && pgHoje.corpo.length);
+  }
+  if (adiarRelatorio) {
+    if (!seco) {
+      await sb('/execucoes_log', {
+        method: 'POST',
+        body: JSON.stringify({
+          rotina: 'rotina-diaria-pontos', sucesso: true, terminado_em: new Date().toISOString(),
+          enviados: resultado.pontos.enviados || 0, falhados: resultado.pontos.recusados || 0,
+          mensagem: 'pontos enviados=' + (resultado.pontos.enviados || 0) + '; relatório aguardando formas de pagamento do robô',
+        }),
+      }).catch(() => {});
+    }
+    resultado.relatorio_adiado = 'aguardando formas de pagamento do robô (ou checagem das 20h30)';
+    return responder(res, 200, resultado);
+  }
+
   if (soPontos) {
     if (!seco) {
       await sb('/execucoes_log', {
