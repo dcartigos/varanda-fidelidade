@@ -80,10 +80,12 @@ jobs:
         run: |
           MODO="coleta"
           if [ "${{ github.event_name }}" = "push" ]; then
-            MODO="$(tr -d '[:space:]' < RODAR_AGORA.txt 2>/dev/null || echo coleta)"
+            MODO="$(head -1 RODAR_AGORA.txt 2>/dev/null | tr -d '[:space:]')"
+            [ -z "$MODO" ] && MODO="coleta"
           elif [ "${{ inputs.so_testar_login }}" = "true" ]; then
             MODO="login"
           fi
           echo "modo: $MODO (evento: ${{ github.event_name }})"
           if [ "$MODO" = "login" ]; then export SO_TESTAR_LOGIN=1; else export SO_TESTAR_LOGIN=0; fi
+          export MODO_ROBO="$MODO"
           node coleta-nomos.js

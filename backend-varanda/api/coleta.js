@@ -404,6 +404,20 @@ module.exports = async function handler(req, res) {
   }
 
   // -------------------------------------------------------------- FECHAR LOG
+  // 20/10/2026: o robô grava um mapa de diagnóstico (ex.: onde ficam as formas
+  // de pagamento no Nomos). Só escreve em execucoes_log; NÃO mexe em coleta_status.
+  if (acao === 'diagnostico') {
+    const r = await sb('/execucoes_log', {
+      method: 'POST',
+      body: JSON.stringify({
+        rotina: limpar(c.rotina).slice(0, 60) || 'robo-diagnostico',
+        sucesso: true, terminado_em: new Date().toISOString(),
+        mensagem: 'diagnostico', detalhe: c.detalhe || null,
+      }),
+    });
+    return responder(res, r.ok ? 200 : 502, { ok: r.ok });
+  }
+
   if (acao === 'fechar_log') {
     const id = Number(c.execucao_id);
     if (!id) return responder(res, 400, { erro: 'execucao_id é obrigatório.' });

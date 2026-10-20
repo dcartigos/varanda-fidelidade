@@ -60,6 +60,10 @@ const TOKEN = String(process.env.VARANDA_TOKEN || '').trim();
 const USUARIO = String(process.env.NOMOS_USUARIO || '').trim();
 const SENHA = String(process.env.NOMOS_SENHA || '');
 const SO_TESTAR_LOGIN = process.env.SO_TESTAR_LOGIN === '1';
+// MODO_ROBO=estrutura (20/10/2026): só descobre COMO o Nomos guarda as formas de
+// pagamento (crédito, débito, PIX, voucher, dinheiro, permuta) e grava o mapa no
+// banco. Não coleta, não mexe na coleta do dia, não manda nada para ninguém.
+const MODO_ROBO = String(process.env.MODO_ROBO || '').trim();
 
 const DIAS_DE_HISTORICO = 7;          // igual ao coletor humano: um dia perdido se corrige no seguinte
 const ESPERA_TABELA_MS = 30000;
@@ -236,6 +240,86 @@ async function importarPedidos(pedidos) {
 // coisas, cardapio_produto_quantidade com nome_produto, quantidade_produto,
 // total_vendido e flag_tipo_unidade — número limpo, sem regex de tela.
 // Só HOJE aqui (dataFim = amanhã), porque kg e buffet são do dia.
+// ---------------------------------------------------------------------------
+// DESCOBERTA — onde estão as formas de pagamento (só nomes de campos e valores
+// de campos de pagamento; nunca nome, telefone ou endereço de cliente)
+// ---------------------------------------------------------------------------
+async function descobrirPagamentos(page) {
+  const PAG = /pag|forma|pix|cart|cr[eé]d|d[eé]b|dinh|vouch|vale|perm|receb|meio|ticket|troco|bandeira/i;
+  const hoje = dataBR(agoraBR());
+  const ontem = dataBR(new Date(agoraBR().getTime() - 86400000));
+  const amanha = dataBR(new Date(agoraBR().getTime() + 86400000));
+  const resultado = {};
+
+  resultado.listarJson = await page.evaluate(async ({ ini, fim, PAGsrc }) => {
+    const PAG = new RegExp(PAGsrc, 'i');
+    const r = await fetch('/app/varanda/gestorpedido/listarJson', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
+      body: new URLSearchParams({ dataInicio: ini, dataFim: fim, horaInicio: '', horaFim: '', cliente: '',
+        pedido_desconto: '', nfc_gerada: '', clienteRegistrado: '', numeroMesa: '', codigoPedidoDiario: '',
+        flag_pedido_agendado: '', dataInicioAgendamento: '', dataFimAgendamento: '',
+        numero_registros: '10000', ordenacao: '' }).toString(),
+    });
+    const j = await r.json();
+    const tipo = (v) => Array.isArray(v) ? 'array[' + v.length + ']' : (v === null ? 'null' : typeof v);
+    const topo = {};
+    for (const k of Object.keys(j)) {
+      const v = j[k];
+      topo[k] = tipo(v);
+      if (PAG.test(k)) topo[k] += ' = ' + JSON.stringify(v).slice(0, 1500);
+      if (Array.isArray(v) && v[0] && typeof v[0] === 'object') topo[k] += ' campos: ' + Object.keys(v[0]).join(',');
+    }
+    const ped = Array.isArray(j.pedidos_json) ? j.pedidos_json : [];
+    const camposPag = ped[0] ? Object.keys(ped[0]).filter((k) => PAG.test(k)) : [];
+    const valores = {};
+    for (const k of camposPag) {
+      const cont = {};
+      for (const p of ped) { const v = JSON.stringify(p[k]).slice(0, 120); cont[v] = (cont[v] || 0) + 1; }
+      valores[k] = Object.entries(cont).sort((a, b) => b[1] - a[1]).slice(0, 25);
+    }
+    // objetos aninhados dentro do pedido com cara de pagamento
+    const aninhados = {};
+    if (ped[0]) for (const k of Object.keys(ped[0])) {
+      const v = ped[0][k];
+      if (v && typeof v === 'object') aninhados[k] = Array.isArray(v) ? ('array: ' + (v[0] && typeof v[0] === 'object' ? Object.keys(v[0]).join(',') : JSON.stringify(v).slice(0, 200))) : Object.keys(v).join(',');
+    }
+    return { http: r.status, periodo: ini + ' a ' + fim, pedidos: ped.length, topo, campos_pedido: ped[0] ? Object.keys(ped[0]) : [], campos_pagamento: camposPag, valores, aninhados };
+  }, { ini: ontem, fim: amanha, PAGsrc: PAG.source });
+
+  // Tela de faturamento diário: escuta o que ela pede e lê o texto (só totais).
+  const rede = [];
+  const ouvir = async (resp) => {
+    try {
+      const u = resp.url();
+      if (!/nomosmenu/.test(u) || /\.(png|jpg|css|js|woff2?|svg|gif)(\?|$)/.test(u)) return;
+      const req = resp.request();
+      const item = { metodo: req.method(), url: u.slice(0, 160), post: (req.postData() || '').slice(0, 300) };
+      const ct = resp.headers()['content-type'] || '';
+      if (/json/.test(ct)) {
+        const j = await resp.json().catch(() => null);
+        if (j && typeof j === 'object') item.json = JSON.stringify(j).slice(0, 2500);
+      }
+      rede.push(item);
+    } catch (e) { /* ignora */ }
+  };
+  page.on('response', ouvir);
+  await page.goto(NOMOS + '/app/varanda/gestorpedido?mode=faturamentodiario', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await dorme(4000);
+  // tenta clicar em pesquisar/filtrar, se existir
+  await page.evaluate(() => { const b = document.querySelector('#btnPesquisar, #btnFiltrar, button[type=submit]'); if (b) b.click(); }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await dorme(4000);
+  page.off('response', ouvir);
+  resultado.faturamento_diario = {
+    url: page.url(),
+    texto: (await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ')).catch(() => '')).slice(0, 3500),
+    rede: rede.slice(0, 15),
+  };
+  return resultado;
+}
+
 async function lerProdutosDeHoje(page) {
   const hoje = dataBR(agoraBR());
   const amanha = dataBR(new Date(agoraBR().getTime() + 86400000));
@@ -466,6 +550,13 @@ async function lerPontos(pageInicial) {
       const ini = await coleta({ acao: 'inicio' }).catch(() => null);
       execucaoId = ini && ini.ok && ini.corpo ? ini.corpo.execucao_id : null;
       return falhar('login', e);
+    }
+    if (MODO_ROBO === 'estrutura') {
+      const mapa = await descobrirPagamentos(page).catch((e) => ({ erro: semSegredo(e && e.message) }));
+      log('estrutura:', JSON.stringify(mapa).slice(0, 3000));
+      const r = await coleta({ acao: 'diagnostico', rotina: 'robo-estrutura-pagamentos', detalhe: mapa });
+      log('diagnostico gravado:', r.status);
+      await browser.close(); return;
     }
     if (SO_TESTAR_LOGIN) {
       log('SO_TESTAR_LOGIN=1: login funcionou, parando aqui sem coletar nada.');

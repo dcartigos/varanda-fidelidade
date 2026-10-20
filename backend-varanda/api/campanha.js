@@ -345,6 +345,15 @@ module.exports = async (req, res) => {
     });
   }
 
+  // 20/10/2026 -- MARKETING PAUSADO A PEDIDO DO LUCAS. O saldo da YCloud fica só
+  // para os pontos (Utility, ~US$ 0,007 cada). Com CAMPANHA_PAUSADA=1 no Vercel,
+  // os crons (10h, feijoada, campanha especial) não mandam nada. Chamada manual
+  // com token continua funcionando (simulação, teste). Para religar: apagar a
+  // variável ou trocar para 0 no Vercel e fazer um redeploy.
+  if (String(process.env.CAMPANHA_PAUSADA || '').trim() === '1' && !porToken) {
+    return res.status(200).json({ pausada: true, aviso: 'Marketing pausado (CAMPANHA_PAUSADA=1). Nada enviado.' });
+  }
+
   if (!SB_URL || !SB_KEY) {
     return res.status(500).json({ erro: 'Supabase não configurado no servidor.' });
   }
