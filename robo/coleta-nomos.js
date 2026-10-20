@@ -348,7 +348,8 @@ async function lerProdutosDeHoje(page) {
     + ' campos_pedido=' + JSON.stringify(ped[0] ? Object.keys(ped[0]) : [])
     + ' campos_produto=' + JSON.stringify(produtos[0] ? Object.keys(produtos[0]) : []));
   log('produtos de hoje:', JSON.stringify(produtos.map((p) => [p.nome_produto, p.quantidade_produto, p.total_vendido, p.flag_tipo_unidade])));
-  return { produtos, faturamento: j.valor_total, qtd_pedidos: j.quantidade_pedido };
+  const formas = Array.isArray(j.formas_pagamento) ? j.formas_pagamento.map((f) => ({ nome: f.nome_pagamento, valor: f.total_forma_pagamento_calculado })) : [];
+  return { produtos, faturamento: j.valor_total, qtd_pedidos: j.quantidade_pedido, formas };
 }
 
 const num = (v) => {
@@ -533,6 +534,15 @@ async function lerPontos(pageInicial) {
     return falhar('config', new Error('Faltam variáveis: ' + [!USUARIO && 'NOMOS_USUARIO', !SENHA && 'NOMOS_SENHA', !TOKEN && 'VARANDA_TOKEN'].filter(Boolean).join(', ')));
   }
 
+  if (MODO_ROBO !== 'estrutura' && !SO_TESTAR_LOGIN && MODO_ROBO !== 'forcar') {
+    const est = await coleta({ acao: 'estado' }).catch(() => null);
+    const e = est && est.ok ? est.corpo : null;
+    if (e && e.completa && e.relatorio_enviado && e.pagamentos_gravados) {
+      log('dia ' + hoje + ' já resolvido (coleta completa, relatório enviado, pagamentos gravados). Nada a fazer.');
+      process.exit(0);
+    }
+  }
+
   try {
     browser = await chromium.launch({ headless: true });
     const contexto = await browser.newContext({
@@ -603,6 +613,14 @@ async function lerPontos(pageInicial) {
       }
     }
     detalhe.buffet_ok = buffetOk; detalhe.buffet_motivo = buffetMotivo;
+
+    // 3b — formas de pagamento (20/10/2026). Nunca derruba a coleta.
+    if (prod && prod.formas && prod.formas.length) {
+      const rpg = await coleta({ acao: 'pagamentos', itens: prod.formas, valor_total: prod.faturamento }).catch(() => null);
+      detalhe.pagamentos = rpg && rpg.corpo ? rpg.corpo.formas : null;
+      if (rpg && rpg.corpo && rpg.corpo.sem_regra && rpg.corpo.sem_regra.length) detalhe.pagamentos_sem_regra = rpg.corpo.sem_regra;
+      log('pagamentos:', JSON.stringify(detalhe.pagamentos));
+    }
     log('buffet:', buffetOk ? 'ok' : buffetMotivo);
 
     // 4 — pontos
@@ -652,7 +670,9 @@ async function lerPontos(pageInicial) {
       + (detalhe.completa
         ? (detalhe.rotina_chamada ? ('Rotina dos pontos chamada agora: ' + JSON.stringify(detalhe.rotina_chamada)) : 'Pontos e fechamento saem as 15h sozinhos.')
         : 'Coleta NAO marcada como completa (faltou: ' + JSON.stringify(detalhe.faltando) + '). As 15h NAO vai enviar.');
-    await telegram(linha);
+    // 20/10/2026: sucesso não vai mais para o Telegram (eram 3 mensagens por dia,
+    // uma por horário do robô). O relatório da rotina já diz que deu certo; se não
+    // fechar, a checagem das 20h30 avisa.
     log(linha);
 
     await browser.close();

@@ -404,6 +404,59 @@ module.exports = async function handler(req, res) {
   }
 
   // -------------------------------------------------------------- FECHAR LOG
+  // 20/10/2026: FORMAS DE PAGAMENTO do dia, do listarJson do Nomos
+  // (formas_pagamento = [{nome_pagamento, total_forma_pagamento_calculado}]).
+  // O Nomos dá o VALOR por forma, não a quantidade de vendas. O mapeamento dos
+  // nomes do Nomos para as 6 formas do relatório fica AQUI, no servidor, para
+  // ajustar sem mexer no robô. O que o Nomos chama de forma e não casar com
+  // nenhuma regra vai para 'outros' (nunca some). iFood é pago no app e não
+  // entra em formas_pagamento: vira 'ifood' = valor_total - soma das formas.
+  if (acao === 'pagamentos') {
+    const itens = Array.isArray(c.itens) ? c.itens : [];
+    const REGRAS = [
+      ['permuta', /permuta/i], ['voucher', /vale|voucher|ticket|alelo|sodexo|pluxee|vr\b/i],
+      ['pix', /pix/i], ['debito', /d[eé]bito/i], ['credito', /cr[eé]dito/i], ['dinheiro', /dinheiro/i],
+    ];
+    const soma = {};
+    let total = 0;
+    for (const it of itens) {
+      const v = num(it && it.valor);
+      if (!v) continue;
+      const nome = limpar(it.nome);
+      const regra = REGRAS.find(([, re]) => re.test(nome));
+      const forma = regra ? regra[0] : 'outros';
+      soma[forma] = (soma[forma] || 0) + v;
+      total += v;
+    }
+    const vt = num(c.valor_total);
+    if (vt && vt - total > 0.01) soma.ifood = vt - total;
+    const linhas = Object.entries(soma).map(([forma, valor]) => ({
+      dia, forma, valor: Math.round(valor * 100) / 100, qtd: null, gravado_em: new Date().toISOString(),
+    }));
+    await sb('/pagamentos_dia?dia=eq.' + dia, { method: 'DELETE' });
+    if (linhas.length) {
+      const g = await sb('/pagamentos_dia', { method: 'POST', body: JSON.stringify(linhas) });
+      if (!g.ok) return responder(res, 502, { erro: 'Falha ao gravar pagamentos.', detalhe: g.corpo });
+    }
+    return responder(res, 200, { ok: true, formas: soma, sem_regra: itens.filter((it) => num(it && it.valor) && !REGRAS.some(([, re]) => re.test(limpar(it.nome)))).map((it) => it.nome) });
+  }
+
+  // 20/10/2026: o robô pergunta se o dia já está resolvido antes de abrir o
+  // navegador. Se a coleta está completa, o relatório já saiu e os pagamentos
+  // já estão gravados, ele não faz nada (e não manda nada no Telegram).
+  if (acao === 'estado') {
+    const q1 = await sb('/coleta_status?select=completa&dia=eq.' + dia);
+    const q2 = await sb('/execucoes_log?select=id&rotina=eq.rotina-diaria&sucesso=is.true&iniciado_em=gte.'
+      + encodeURIComponent(dia + 'T00:00:00-03:00') + '&limit=1');
+    const q3 = await sb('/pagamentos_dia?select=forma&dia=eq.' + dia + '&limit=1');
+    const st = q1.ok && Array.isArray(q1.corpo) && q1.corpo[0] ? q1.corpo[0] : {};
+    return responder(res, 200, {
+      dia, completa: !!st.completa,
+      relatorio_enviado: !!(q2.ok && Array.isArray(q2.corpo) && q2.corpo.length),
+      pagamentos_gravados: !!(q3.ok && Array.isArray(q3.corpo) && q3.corpo.length),
+    });
+  }
+
   // 20/10/2026: o robô grava um mapa de diagnóstico (ex.: onde ficam as formas
   // de pagamento no Nomos). Só escreve em execucoes_log; NÃO mexe em coleta_status.
   if (acao === 'diagnostico') {

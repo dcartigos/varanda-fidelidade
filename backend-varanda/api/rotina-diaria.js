@@ -166,7 +166,7 @@ module.exports = async function handler(req, res) {
     && String(req.headers.authorization || '') === 'Bearer ' + segredoCron;
   const doCron = !!req.headers['x-vercel-cron']
     || porSegredo
-    || (ehUACron && horaBR >= 14 && horaBR < 18);
+    || (ehUACron && horaBR >= 14 && horaBR < 22);
   const recebido = String((req.query && req.query.token) || req.headers['x-varanda-token'] || '').trim();
   const aceitos = [process.env.TESTE_TOKEN, process.env.IMPORT_TOKEN, process.env.APP_TOKEN]
     .filter(Boolean).map((t) => String(t).trim());
@@ -271,25 +271,22 @@ module.exports = async function handler(req, res) {
       }),
     });
 
-    // 22/09/2026 -- E AVISA NO TELEGRAM.
-    // Gravar numa tabela que ninguem abre E uma recusa silenciosa. De 15 a
-    // 22/09 esta rotina se bloqueou todo dia e ninguem soube: o Lucas so
-    // descobriu 8 dias depois, perguntando. Uma rotina que se recusa a rodar
-    // tem a obrigacao de dizer isso para uma pessoa, no mesmo dia.
-    // Se o aviso falhar, nao muda nada: o bloqueio ja aconteceu e esta certo.
-    try {
-      await enviarTelegram(
-        'VARANDA - ROTINA DAS 15h BLOQUEADA (' + hojeBR + ')\n\n'
-        + 'Nao mandei pontos para cliente nenhum, nem o relatorio de '
-        + 'fechamento. Motivo: o Coletor nao declarou a coleta de hoje como '
-        + 'completa, entao os numeros do dia nao existem ou nao sao confiaveis.\n\n'
-        + 'Isso NAO e um erro do servidor -- e a trava funcionando. Enviar '
-        + 'agora seria mandar saldo errado para cliente.\n\n'
-        + 'O QUE FAZER: rodar o Coletor no PC do Varanda. Assim que ele '
-        + 'terminar, abrir /api/rotina-diaria de novo (a idempotencia impede '
-        + 'envio duplicado).'
-      );
-    } catch (e) { /* o aviso e acessorio, nunca derruba a rotina */ }
+    // 20/10/2026 -- SÓ AVISA NA CHECAGEM DAS 20h30.
+    // Antes avisava todo dia às 15h: o robô do GitHub costuma terminar entre
+    // 16h e 20h e ele mesmo chama esta rotina, então o aviso das 15h virou
+    // barulho diário no Telegram ("bloqueada" num dia que dava certo depois).
+    // Agora: 15h bloqueado = silêncio. Às 20h30 (cron ?checagem=1), se ainda
+    // não fechou, aí sim é problema de verdade -- um aviso, com o que faltou.
+    if (qy.checagem === '1') {
+      try {
+        const st = await sb('/coleta_status?select=*&dia=eq.' + hoje);
+        const c0 = st.ok && Array.isArray(st.corpo) && st.corpo[0] ? st.corpo[0] : null;
+        const faltou = !c0 ? 'o robô não rodou hoje'
+          : [!c0.tem_pedidos_de_hoje && 'pedidos', !c0.clientes_com_saldo && 'saldos de pontos'].filter(Boolean).join(' e ') || 'coleta não marcada como completa';
+        await enviarTelegram('⚠️ *VARANDA ' + hojeBR + '* — a coleta do Nomos não fechou até 20h30.\n'
+          + 'Pontos dos clientes e relatório de hoje *não saíram*.\nFaltou: ' + faltou + '.');
+      } catch (e) { /* aviso é acessório */ }
+    }
 
     return responder(res, 200, resultado);
   }
@@ -440,28 +437,50 @@ module.exports = async function handler(req, res) {
   const novos = Number(n.novos || 0);
   const pct = (v) => pedidos ? Math.round((v / pedidos) * 100) : 0;
 
+  // 20/10/2026 -- RELATÓRIO NOVO, MAIS ENXUTO (pedido do Lucas: "chega muita
+  // coisa, fica difícil acompanhar"). Uma mensagem só por dia, em blocos curtos,
+  // só com o que importa. Inclui formas de pagamento (tabela pagamentos_dia,
+  // gravada pelo robô). Canal sem venda não aparece; forma de pagamento sempre
+  // aparece (as 6 que o Lucas pediu), com "—" se o Nomos não informou.
   const blocoClientes =
-    '*CLIENTES — ' + pedidos + ' pedidos*\n\n' +
-    '• novos cadastros: ' + novos + '\n' +
-    '• voltaram: ' + Math.max(0, ident - novos) + '\n' +
-    '• identificados: ' + ident + '  (' + pct(ident) + '%)\n' +
-    '• não cadastrados: ' + (pedidos - ident) + '  (' + pct(pedidos - ident) + '%)';
+    '👥 *Clientes:* ' + ident + ' identificados (' + pct(ident) + '%) · ' + novos + ' novos · '
+    + Math.max(0, ident - novos) + ' voltaram\n'
+    + '    ' + (pedidos - ident) + ' sem cadastro';
+
+  const canais = [
+    ['🍽 Salão', n.salao, n.salao_qtd], ['🛵 Delivery', n.delivery, n.delivery_qtd], ['🥡 Balcão', n.balcao, n.balcao_qtd],
+  ].filter((c) => Number(c[1] || 0) > 0 || Number(c[2] || 0) > 0)
+   .map((c) => c[0] + ' R$ ' + dinheiro(c[1]) + ' (' + (c[2] || 0) + ')').join('\n');
+
+  const pg = await sb('/pagamentos_dia?select=forma,qtd,valor&dia=eq.' + hoje);
+  const pgMapa = {};
+  for (const x of (pg.ok && Array.isArray(pg.corpo) ? pg.corpo : [])) pgMapa[x.forma] = x;
+  const temPg = Object.keys(pgMapa).length > 0;
+  const FORMAS = [['credito', 'Crédito'], ['debito', 'Débito'], ['pix', 'PIX'], ['voucher', 'Voucher'], ['dinheiro', 'Dinheiro'], ['permuta', 'Permuta']];
+  // O Nomos informa o VALOR por forma (não a quantidade de vendas). Mostra valor
+  // e % do total. iFood é pago no app, por isso aparece separado.
+  const totalPg = Object.values(pgMapa).reduce((t, x) => t + Number(x.valor || 0), 0);
+  const pctPg = (v) => totalPg ? Math.round((Number(v || 0) / totalPg) * 100) + '%' : '';
+  const linhasPg = FORMAS.map(([k, nome]) => {
+    const x = pgMapa[k];
+    return '• ' + nome + ': ' + (x ? 'R$ ' + dinheiro(x.valor) + ' · ' + pctPg(x.valor) : (temPg ? 'R$ 0,00' : '—'));
+  });
+  if (pgMapa.outros) linhasPg.push('• Outros: R$ ' + dinheiro(pgMapa.outros.valor) + ' · ' + pctPg(pgMapa.outros.valor));
+  if (pgMapa.ifood) linhasPg.push('• iFood (pago no app): R$ ' + dinheiro(pgMapa.ifood.valor) + ' · ' + pctPg(pgMapa.ifood.valor));
+
+  const ticket = pedidos ? Number(n.total || 0) / pedidos : 0;
+  const pontosEnv = (resultado.pontos && resultado.pontos.enviados) || 0;
 
   const completo =
-    '*VARANDA — ' + hojeBR + ' (' + diaSemana + ')*\n\n' +
-    '*FATURAMENTO TOTAL: R$ ' + dinheiro(n.total) + '*\n\n' +
-    '• salão: R$ ' + dinheiro(n.salao) + '  (' + (n.salao_qtd || 0) + ' pedidos)\n' +
-    '• delivery: R$ ' + dinheiro(n.delivery) + '  (' + (n.delivery_qtd || 0) + ' pedidos)\n' +
-    '• balcão: R$ ' + dinheiro(n.balcao) + '  (' + (n.balcao_qtd || 0) + ' pedidos)\n\n' +
-    '=========================\n\n' +
-    '*QUANTIDADE*\n\n' +
-    '• buffet por kg: ' + linhaKg + '\n' +
-    '• buffet livre: ' + linhaLivre + '\n\n' +
-    '=========================\n\n' +
-    blocoClientes + '\n\n' +
-    '=========================\n\n' +
-    (linhaKg === NC ? '_O PC do Varanda não gravou o kg de hoje._\n' : '') +
-    '_Responda OK para manter o envio gratuito._';
+    '📊 *VARANDA · ' + diaSemana + ' ' + hojeBR.slice(0, 5) + '*\n\n'
+    + '💰 *R$ ' + dinheiro(n.total) + '* · ' + pedidos + ' pedidos · ticket R$ ' + dinheiro(ticket) + '\n'
+    + (canais ? canais + '\n' : '')
+    + '\n💳 *Pagamentos*\n' + linhasPg.join('\n') + '\n'
+    + '\n⚖️ *Buffet*\n'
+    + '• Por kg: ' + (b && b.kg ? dinheiro(b.kg) + ' kg · R$ ' + dinheiro(b.valor_kg) : NC) + '\n'
+    + '• Livre: ' + (b && b.livre_qtd ? b.livre_qtd + ' pessoas · R$ ' + dinheiro(b.livre_valor) : (b ? '0' : NC)) + '\n'
+    + '\n' + blocoClientes + '\n'
+    + '\n⭐ *Pontos enviados aos clientes:* ' + pontosEnv;
 
   resultado.fechamento = {
     kg_confirmado: linhaKg !== NC,
