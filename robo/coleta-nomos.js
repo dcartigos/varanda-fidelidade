@@ -614,6 +614,15 @@ async function lerPontos(pageInicial) {
     }
     detalhe.buffet_ok = buffetOk; detalhe.buffet_motivo = buffetMotivo;
 
+    // 12/11/2026 - o kg sumiu do relatorio desde 04/11 e NINGUEM percebeu,
+    // porque a coleta continuava se declarando "completa" sem o buffet.
+    // Falha muda = oito dias de relatorio sem kg. A partir de hoje, se o
+    // buffet nao entrar, o Telegram avisa na hora E diz os nomes que o Nomos
+    // devolveu, que e o unico jeito de consertar no mesmo dia.
+    if (!buffetOk) {
+      await telegram('AVISO VARANDA - o kg/buffet NAO entrou na coleta de hoje.' + '\n' + '\n' + buffetMotivo).catch(function () {});
+    }
+
     // 3b — formas de pagamento (20/10/2026). Nunca derruba a coleta.
     if (prod && prod.formas && prod.formas.length) {
       const rpg = await coleta({ acao: 'pagamentos', itens: prod.formas, valor_total: prod.faturamento }).catch(() => null);
