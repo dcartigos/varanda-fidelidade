@@ -341,7 +341,32 @@ async function lerProdutosDeHoje(page) {
 
   if (!j || j.erro) { log('listarJson falhou:', j && j.erro); return null; }
 
-  const produtos = Array.isArray(j.cardapio_produto_quantidade) ? j.cardapio_produto_quantidade : [];
+  // 12/11/2026 - PARAMOS DE ACHAR O KG EM 04/11. O listarJson continua
+  // respondendo (41 pedidos hoje), mas cardapio_produto_quantidade voltou
+  // VAZIO e os campos dos pedidos viraram numerados (0,1,2...): o Nomos mudou
+  // o formato da resposta. Entao: 1) registramos as chaves que vieram, para
+  // nao ficarmos adivinhando de novo; 2) se a chave de sempre vier vazia,
+  // procuramos a lista de produtos em QUALQUER chave da resposta, pelo
+  // formato dos itens (tem nome de produto e tem quantidade).
+  log('chaves do listarJson:', JSON.stringify(Object.keys(j || {})));
+  function pareceProduto(v) {
+    if (!Array.isArray(v) || !v.length) return false;
+    const p = v[0];
+    if (!p || typeof p !== 'object') return false;
+    const k = Object.keys(p).join('|').toLowerCase();
+    return /produto|descricao|nome/.test(k) && /quantidade|qtd|total/.test(k);
+  }
+  let produtos = Array.isArray(j.cardapio_produto_quantidade) ? j.cardapio_produto_quantidade : [];
+  if (!produtos.length) {
+    for (const chave of Object.keys(j || {})) {
+      if (chave === 'cardapio_produto_quantidade') continue;
+      if (pareceProduto(j[chave])) {
+        produtos = j[chave];
+        log('produtos achados em outra chave:', chave, JSON.stringify(Object.keys(produtos[0])));
+        break;
+      }
+    }
+  }
   // Para a evolução do robô: só os NOMES dos campos e dos produtos, nunca dado de cliente.
   const ped = Array.isArray(j.pedidos_json) ? j.pedidos_json : [];
   log('listarJson: pedidos_hoje=' + ped.length + ' produtos=' + produtos.length
