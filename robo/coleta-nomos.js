@@ -1,1 +1,740 @@
+// ============================================================================
+// O ROBÔ DE COLETA DO NOMOS  (22/09/2026)
+// ============================================================================
+//
+// Roda no GitHub Actions, todo dia às 14h (seg–sáb), sem PC nenhum ligado.
+// Abre um navegador invisível, FAZ O LOGIN no Nomos com usuário e senha que
+// vivem no cofre do GitHub, lê pedidos / pontos / kg / buffet, e grava tudo
+// pelas MESMAS portas que o coletor humano usava (/api/importar e /api/coleta).
+// Às 15h a rotina da Vercel (/api/rotina-diaria) encontra a coleta completa e
+// manda os pontos e o fechamento sozinha.
+//
+// POR QUE EXISTE
+// De 15 a 22/09/2026 o coletor humano (uma conversa do Claude no PC do
+// Varanda, disparada quando alguém digitava "execute") ficou parado, e com ele
+// pararam os pontos e o fechamento. Ninguém digitou "execute" porque ninguém é
+// obrigado a lembrar. Além disso, todo caminho baseado em cookie salvo vence
+// em semanas. Este robô faz o login de verdade, todo dia, então não há cookie
+// para vencer nem pessoa para lembrar.
+//
+// O QUE ELE FAZ, NA ORDEM
+//   0. login no Nomos (usuário/senha do cofre)              -> falhou? avisa e para
+//   1. /api/coleta {acao:'inicio'}                          -> abre a coleta do dia
+//   2. pedidos dos últimos 7 dias, pela tabela do gestorpedido (o mesmo
+//      método que funcionou por semanas) -> /api/importar -> {acao:'pedidos'}
+//   3. listarJson (o atalho JSON) só para os PRODUTOS: kg e buffet livre
+//      -> {acao:'buffet'}
+//   4. CRM > Programa de Fidelidade > olho > #tabelaRelatorio -> {acao:'pontos'}
+//   5. {acao:'concluir'}                                     -> marca completa
+//   6. manda o cookie da sessão para /api/nomos-sessao (bônus: o servidor
+//      passa a conseguir ler o Nomos sozinho até o cookie vencer)
+//   7. {acao:'fechar_log'} e um resumo de uma linha no Telegram
+//
+// O QUE ELE NÃO FAZ (de propósito)
+//   - Não manda WhatsApp. Nunca chama /api/enviar nem /api/rotina-diaria.
+//     Quem envia é o cron das 15h. Coletar e enviar são coisas separadas.
+//   - Não lê despesas (Google Sheets) nem o Portal do iFood. O relatório sai
+//     com "(não confirmado)" nesses campos, como o desenho já previa.
+//   - Não inventa número. Se não achou o kg, não manda kg. O servidor recusa
+//     a coleta como completa e o Telegram diz exatamente o que faltou.
+//
+// SEGURANÇA
+//   - A senha entra só em page.fill('#senha', ...). Nunca em log, nunca em
+//     mensagem, nunca em erro. O GitHub ainda mascara os secrets no log.
+//   - Um token só (VARANDA_TOKEN). Ele abre /api/coleta, /api/importar e
+//     /api/telegram. Nunca abre /api/enviar em modo de envio de campanha.
+//
+// VARIÁVEIS DE AMBIENTE (secrets do GitHub)
+//   NOMOS_USUARIO   NOMOS_SENHA   VARANDA_TOKEN
+//   BACKEND (opcional, padrão https://varanda-backend.vercel.app)
+//   SO_TESTAR_LOGIN=1 (opcional): faz o login, confere, e para. Não grava nada.
+// ============================================================================
 
+'use strict';
+
+const { chromium } = require('playwright');
+
+const NOMOS = 'https://www.nomosmenu.com.br';
+const BACKEND = (process.env.BACKEND || 'https://varanda-backend.vercel.app').replace(/\/$/, '');
+const TOKEN = String(process.env.VARANDA_TOKEN || '').trim();
+const USUARIO = String(process.env.NOMOS_USUARIO || '').trim();
+const SENHA = String(process.env.NOMOS_SENHA || '');
+const SO_TESTAR_LOGIN = process.env.SO_TESTAR_LOGIN === '1';
+// MODO_ROBO=estrutura (20/10/2026): só descobre COMO o Nomos guarda as formas de
+// pagamento (crédito, débito, PIX, voucher, dinheiro, permuta) e grava o mapa no
+// banco. Não coleta, não mexe na coleta do dia, não manda nada para ninguém.
+const MODO_ROBO = String(process.env.MODO_ROBO || '').trim();
+
+const DIAS_DE_HISTORICO = 7;          // igual ao coletor humano: um dia perdido se corrige no seguinte
+const ESPERA_TABELA_MS = 30000;
+
+// ---------------------------------------------------------------------------
+// utilidades
+// ---------------------------------------------------------------------------
+const log = (...a) => console.log('[robo]', new Date().toISOString(), ...a);
+const dorme = (ms) => new Promise((r) => setTimeout(r, ms));
+const dd = (n) => String(n).padStart(2, '0');
+
+/** Data de Brasília, sem depender do fuso da máquina do GitHub (que é UTC). */
+function agoraBR() { return new Date(Date.now() - 3 * 3600 * 1000); }
+function dataBR(d) { return dd(d.getUTCDate()) + '/' + dd(d.getUTCMonth() + 1) + '/' + d.getUTCFullYear(); }
+function hojeISO() { return agoraBR().toISOString().slice(0, 10); }
+
+/** Nunca deixa a senha vazar por acidente numa mensagem de erro. */
+function semSegredo(txt) {
+  let s = String(txt == null ? '' : txt);
+  if (SENHA && SENHA.length >= 3) s = s.split(SENHA).join('***');
+  if (TOKEN && TOKEN.length >= 3) s = s.split(TOKEN).join('***');
+  return s;
+}
+
+/** Chamada ao nosso backend, com o token. Sempre devolve {ok, status, corpo}. */
+async function backend(caminho, corpo, metodo) {
+  const r = await fetch(BACKEND + caminho, {
+    method: metodo || 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-varanda-token': TOKEN },
+    body: metodo === 'GET' ? undefined : JSON.stringify(corpo || {}),
+  });
+  const txt = await r.text();
+  let j = null; try { j = txt ? JSON.parse(txt) : null; } catch (_) { j = { bruto: txt.slice(0, 300) }; }
+  return { ok: r.ok, status: r.status, corpo: j };
+}
+
+const coleta = (corpo) => backend('/api/coleta', corpo);
+
+/** Aviso para a EQUIPE. Falhar aqui nunca derruba o robô. */
+async function telegram(texto) {
+  try {
+    const t = semSegredo(texto).slice(0, 3500);
+    const r = await fetch(BACKEND + '/api/telegram?acao=enviar&token=' + encodeURIComponent(TOKEN)
+      + '&texto=' + encodeURIComponent(t));
+    log('telegram:', r.status);
+  } catch (e) { log('telegram falhou:', semSegredo(e && e.message)); }
+}
+
+// ---------------------------------------------------------------------------
+// PASSO 0 — LOGIN
+// ---------------------------------------------------------------------------
+// A tela é um formulário simples: #usuario, #senha, #flagRememberLogin,
+// #btnLogar (type=button, o JS da página faz o POST). Sem captcha, sem SMS.
+// Prova de login: abrir o gestorpedido e NÃO ver o campo #senha.
+async function login(page) {
+  await page.goto(NOMOS + '/app', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForSelector('#usuario', { timeout: 30000 });
+  await page.fill('#usuario', USUARIO);
+  await page.fill('#senha', SENHA);
+  const lembrar = await page.$('#flagRememberLogin');
+  if (lembrar && !(await lembrar.isChecked())) await lembrar.check().catch(() => {});
+  await page.click('#btnLogar');
+
+  // Espera o formulário sumir OU um erro aparecer.
+  // ⚠️ 22/09/2026: enquanto o Nomos troca de página depois do login, qualquer
+  // page.$ / page.evaluate pode explodir com "Execution context was destroyed".
+  // Isso NÃO é falha de login -- é a página navegando. Por isso cada olhada
+  // está protegida: se a página estava no meio de uma troca, espera e olha de novo.
+  const limite = Date.now() + 45000;
+  while (Date.now() < limite) {
+    await dorme(1000);
+    let temSenha;
+    try { temSenha = await page.$('#senha'); }
+    catch (e) { await page.waitForLoadState('domcontentloaded').catch(() => {}); continue; }
+    if (!temSenha) break;
+    const erro = await page.evaluate(() => {
+      const el = document.querySelector('.jconfirm-content, .alert-danger, .notificacao, .toast-message, .swal2-html-container');
+      return el ? el.innerText.trim().slice(0, 200) : '';
+    }).catch(() => '');
+    if (/senha|usu[aá]rio|inv[aá]lid|incorret|bloquead/i.test(erro)) throw new Error('Nomos recusou o login: ' + erro);
+  }
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+
+  await page.goto(NOMOS + '/app/varanda/gestorpedido', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await dorme(2500);
+  const aindaNoLogin = await page.$('#senha').catch(() => null);
+  if (aindaNoLogin) {
+    throw new Error('LOGIN FALHOU: depois de enviar usuário e senha o Nomos continuou na tela de login. '
+      + 'Ou a senha mudou, ou o Nomos bloqueou. Ninguém digitou nada errado por aqui — conferir NOMOS_USUARIO / NOMOS_SENHA no cofre.');
+  }
+  const cookie = await page.evaluate(() => document.cookie).catch(() => '');
+  log('login ok. cookies na página:', (cookie.match(/=/g) || []).length);
+  return cookie;
+}
+
+// ---------------------------------------------------------------------------
+// PASSO 2 — PEDIDOS (pela tabela, o método que funcionou por semanas)
+// ---------------------------------------------------------------------------
+// Portado de "PC VARANDA/1 - COLETOR (EXECUTE)/coleta_nomos.js". Mesmo filtro,
+// mesma espera, mesmas 5 colunas. A data final é AMANHÃ de propósito: o Nomos
+// trata dataFim como "até aquele dia 00:00" e EXCLUI o dia inteiro (19/08).
+async function lerPedidos(page) {
+  const fim = new Date(agoraBR().getTime() + 86400000);
+  const ini = new Date(agoraBR().getTime() - DIAS_DE_HISTORICO * 86400000);
+  const sIni = dataBR(ini), sFim = dataBR(fim);
+  log('pedidos: filtrando', sIni, 'a', sFim, '(fim = amanhã, de propósito)');
+
+  await page.waitForFunction(() => window.jQuery && jQuery.fn && jQuery.fn.DataTable, null, { timeout: 30000 });
+
+  const resultado = await page.evaluate(async ({ sIni, sFim, esperaMs }) => {
+    const set = (sel, v) => {
+      const el = document.querySelector(sel);
+      if (!el) throw new Error('Filtro não encontrado: ' + sel + ' — o Nomos mudou o layout.');
+      el.value = v; el.dispatchEvent(new Event('change', { bubbles: true }));
+    };
+    set('#dataInicio', sIni);
+    set('#dataFim', sFim);
+    set('#dataInicioFim', sIni + ' - ' + sFim);
+    set('#numero_registros', '10000');
+
+    const tabela = () => jQuery('#dataTablePedidos').DataTable();
+    const antes = tabela().rows().count();
+    document.querySelector('#btnPesquisar').click();
+
+    const limite = Date.now() + esperaMs;
+    let agora = antes;
+    while (Date.now() < limite) {
+      await new Promise((r) => setTimeout(r, 1000));
+      agora = tabela().rows().count();
+      if (agora !== antes) break;
+    }
+    await new Promise((r) => setTimeout(r, 2500));
+
+    const dt = tabela();
+    const total = dt.rows().count();
+    const celula = (i, j) => { const n = dt.cell(i, j).node(); return n ? n.innerText.trim().replace(/\s+/g, ' ') : ''; };
+    const pedidos = [];
+    for (let i = 0; i < total; i++) {
+      const cod = (celula(i, 0).match(/^\d+/) || [''])[0];
+      if (!cod) continue;
+      pedidos.push({ codigo: cod, tipo: celula(i, 1), valor: celula(i, 2), data: celula(i, 3), cliente: celula(i, 4) });
+    }
+    return { total, pedidos, mudou: agora !== antes };
+  }, { sIni, sFim, esperaMs: ESPERA_TABELA_MS });
+
+  if (!resultado.pedidos.length) {
+    throw new Error('A pesquisa de pedidos voltou vazia (' + resultado.total + ' linhas). Não vou importar nada.');
+  }
+  const hojeBR = dd(agoraBR().getUTCDate()) + '/' + dd(agoraBR().getUTCMonth() + 1);
+  const temHoje = resultado.pedidos.some((p) => String(p.data || '').startsWith(hojeBR));
+  log('pedidos lidos:', resultado.pedidos.length, '· tem pedidos de hoje:', temHoje);
+  return { pedidos: resultado.pedidos, temHoje };
+}
+
+async function importarPedidos(pedidos) {
+  const ano = agoraBR().getUTCFullYear();
+  const resumo = { lidos: pedidos.length, novos: 0, ja_existiam: 0, identificados: 0, problemas: [] };
+  for (let i = 0; i < pedidos.length; i += 1000) {
+    const r = await backend('/api/importar', { pedidos: pedidos.slice(i, i + 1000), ano });
+    if (!r.ok) throw new Error('/api/importar recusou (HTTP ' + r.status + '): ' + JSON.stringify(r.corpo).slice(0, 300));
+    resumo.novos += r.corpo.novos_gravados || 0;
+    resumo.ja_existiam += r.corpo.ja_existiam || 0;
+    resumo.identificados += r.corpo.identificados || 0;
+    if (Array.isArray(r.corpo.problemas)) resumo.problemas.push(...r.corpo.problemas);
+  }
+  log('importar:', JSON.stringify({ ...resumo, problemas: resumo.problemas.length }));
+  return resumo;
+}
+
+// ---------------------------------------------------------------------------
+// PASSO 3 — KG E BUFFET LIVRE (pelo listarJson, só os produtos)
+// ---------------------------------------------------------------------------
+// Chamado DENTRO da página, com a sessão do navegador. Devolve, entre outras
+// coisas, cardapio_produto_quantidade com nome_produto, quantidade_produto,
+// total_vendido e flag_tipo_unidade — número limpo, sem regex de tela.
+// Só HOJE aqui (dataFim = amanhã), porque kg e buffet são do dia.
+// ---------------------------------------------------------------------------
+// DESCOBERTA — onde estão as formas de pagamento (só nomes de campos e valores
+// de campos de pagamento; nunca nome, telefone ou endereço de cliente)
+// ---------------------------------------------------------------------------
+async function descobrirPagamentos(page) {
+  const PAG = /pag|forma|pix|cart|cr[eé]d|d[eé]b|dinh|vouch|vale|perm|receb|meio|ticket|troco|bandeira/i;
+  const hoje = dataBR(agoraBR());
+  const ontem = dataBR(new Date(agoraBR().getTime() - 86400000));
+  const amanha = dataBR(new Date(agoraBR().getTime() + 86400000));
+  const resultado = {};
+
+  resultado.listarJson = await page.evaluate(async ({ ini, fim, PAGsrc }) => {
+    const PAG = new RegExp(PAGsrc, 'i');
+    const r = await fetch('/app/varanda/gestorpedido/listarJson', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
+      body: new URLSearchParams({ dataInicio: ini, dataFim: fim, horaInicio: '', horaFim: '', cliente: '',
+        pedido_desconto: '', nfc_gerada: '', clienteRegistrado: '', numeroMesa: '', codigoPedidoDiario: '',
+        flag_pedido_agendado: '', dataInicioAgendamento: '', dataFimAgendamento: '',
+        numero_registros: '10000', ordenacao: '' }).toString(),
+    });
+    const j = await r.json();
+    const tipo = (v) => Array.isArray(v) ? 'array[' + v.length + ']' : (v === null ? 'null' : typeof v);
+    const topo = {};
+    for (const k of Object.keys(j)) {
+      const v = j[k];
+      topo[k] = tipo(v);
+      if (PAG.test(k)) topo[k] += ' = ' + JSON.stringify(v).slice(0, 1500);
+      if (Array.isArray(v) && v[0] && typeof v[0] === 'object') topo[k] += ' campos: ' + Object.keys(v[0]).join(',');
+    }
+    const ped = Array.isArray(j.pedidos_json) ? j.pedidos_json : [];
+    const camposPag = ped[0] ? Object.keys(ped[0]).filter((k) => PAG.test(k)) : [];
+    const valores = {};
+    for (const k of camposPag) {
+      const cont = {};
+      for (const p of ped) { const v = JSON.stringify(p[k]).slice(0, 120); cont[v] = (cont[v] || 0) + 1; }
+      valores[k] = Object.entries(cont).sort((a, b) => b[1] - a[1]).slice(0, 25);
+    }
+    // objetos aninhados dentro do pedido com cara de pagamento
+    const aninhados = {};
+    if (ped[0]) for (const k of Object.keys(ped[0])) {
+      const v = ped[0][k];
+      if (v && typeof v === 'object') aninhados[k] = Array.isArray(v) ? ('array: ' + (v[0] && typeof v[0] === 'object' ? Object.keys(v[0]).join(',') : JSON.stringify(v).slice(0, 200))) : Object.keys(v).join(',');
+    }
+    return { http: r.status, periodo: ini + ' a ' + fim, pedidos: ped.length, topo, campos_pedido: ped[0] ? Object.keys(ped[0]) : [], campos_pagamento: camposPag, valores, aninhados };
+  }, { ini: ontem, fim: amanha, PAGsrc: PAG.source });
+
+  // Tela de faturamento diário: escuta o que ela pede e lê o texto (só totais).
+  const rede = [];
+  const ouvir = async (resp) => {
+    try {
+      const u = resp.url();
+      if (!/nomosmenu/.test(u) || /\.(png|jpg|css|js|woff2?|svg|gif)(\?|$)/.test(u)) return;
+      const req = resp.request();
+      const item = { metodo: req.method(), url: u.slice(0, 160), post: (req.postData() || '').slice(0, 300) };
+      const ct = resp.headers()['content-type'] || '';
+      if (/json/.test(ct)) {
+        const j = await resp.json().catch(() => null);
+        if (j && typeof j === 'object') item.json = JSON.stringify(j).slice(0, 2500);
+      }
+      rede.push(item);
+    } catch (e) { /* ignora */ }
+  };
+  page.on('response', ouvir);
+  await page.goto(NOMOS + '/app/varanda/gestorpedido?mode=faturamentodiario', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await dorme(4000);
+  // tenta clicar em pesquisar/filtrar, se existir
+  await page.evaluate(() => { const b = document.querySelector('#btnPesquisar, #btnFiltrar, button[type=submit]'); if (b) b.click(); }).catch(() => {});
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await dorme(4000);
+  page.off('response', ouvir);
+  resultado.faturamento_diario = {
+    url: page.url(),
+    texto: (await page.evaluate(() => document.body.innerText.replace(/\s+/g, ' ')).catch(() => '')).slice(0, 3500),
+    rede: rede.slice(0, 15),
+  };
+  return resultado;
+}
+
+async function lerProdutosDeHoje(page) {
+  const hoje = dataBR(agoraBR());
+  const amanha = dataBR(new Date(agoraBR().getTime() + 86400000));
+  const j = await page.evaluate(async ({ hoje, amanha }) => {
+    const r = await fetch('/app/varanda/gestorpedido/listarJson', {
+      method: 'POST', credentials: 'include',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'X-Requested-With': 'XMLHttpRequest' },
+      body: new URLSearchParams({
+        dataInicio: hoje, dataFim: amanha,
+        horaInicio: '', horaFim: '', cliente: '', pedido_desconto: '', nfc_gerada: '',
+        clienteRegistrado: '', numeroMesa: '', codigoPedidoDiario: '',
+        flag_pedido_agendado: '', dataInicioAgendamento: '', dataFimAgendamento: '',
+        numero_registros: '10000', ordenacao: '',
+      }).toString(),
+    });
+    if (!r.ok) return { erro: 'HTTP ' + r.status };
+    return r.json();
+  }, { hoje, amanha });
+
+  if (!j || j.erro) { log('listarJson falhou:', j && j.erro); return null; }
+
+  // 12/11/2026 - PARAMOS DE ACHAR O KG EM 04/11. O listarJson continua
+  // respondendo (41 pedidos hoje), mas cardapio_produto_quantidade voltou
+  // VAZIO e os campos dos pedidos viraram numerados (0,1,2...): o Nomos mudou
+  // o formato da resposta. Entao: 1) registramos as chaves que vieram, para
+  // nao ficarmos adivinhando de novo; 2) se a chave de sempre vier vazia,
+  // procuramos a lista de produtos em QUALQUER chave da resposta, pelo
+  // formato dos itens (tem nome de produto e tem quantidade).
+  // =======================================================================
+  // 13/11/2026 - O NOMOS MUDOU O FORMATO. Nao adivinhe: esta escrito aqui.
+  // =======================================================================
+  // Ate 03/11 os produtos vinham em j.cardapio_produto_quantidade, com os
+  // campos nome_produto / quantidade_produto / total_vendido. Em 04/11 essa
+  // chave sumiu e o kg saiu do relatorio por nove dias sem ninguem perceber.
+  // O lugar novo e:
+  //
+  //   j.itens_vendidos.origens[]  ->  { codigo, nome, produtos[] }
+  //   produtos[]                  ->  { nome, flag_kg, quantidade, valor }
+  //
+  // Sao varias origens (sistema, ifood, aiqfome...): somamos todas. Aqui a
+  // gente so TRADUZ para os nomes antigos, para nao mexer no resto do robo.
+  log('chaves do listarJson:', JSON.stringify(Object.keys(j || {})));
+
+  let produtos = Array.isArray(j.cardapio_produto_quantidade) ? j.cardapio_produto_quantidade : [];
+  const origens = (j.itens_vendidos && Array.isArray(j.itens_vendidos.origens)) ? j.itens_vendidos.origens : [];
+  if (!produtos.length && origens.length) {
+    for (const org of origens) {
+      for (const pr of (Array.isArray(org.produtos) ? org.produtos : [])) {
+        produtos.push({
+          nome_produto: pr.nome,
+          quantidade_produto: pr.quantidade,
+          total_vendido: pr.valor,
+          flag_tipo_unidade: pr.flag_kg ? 'kg' : '',
+          origem: org.codigo || org.nome || '',
+        });
+      }
+    }
+    log('produtos lidos de itens_vendidos:', origens.length + ' origens, ' + produtos.length + ' produtos');
+  }
+  // Para a evolução do robô: só os NOMES dos campos e dos produtos, nunca dado de cliente.
+  const ped = Array.isArray(j.pedidos_json) ? j.pedidos_json : [];
+  log('listarJson: pedidos_hoje=' + ped.length + ' produtos=' + produtos.length
+    + ' campos_pedido=' + JSON.stringify(ped[0] ? Object.keys(ped[0]) : [])
+    + ' campos_produto=' + JSON.stringify(produtos[0] ? Object.keys(produtos[0]) : []));
+  log('produtos de hoje:', JSON.stringify(produtos.map((p) => [p.nome_produto, p.quantidade_produto, p.total_vendido, p.flag_tipo_unidade])));
+  const formas = Array.isArray(j.formas_pagamento) ? j.formas_pagamento.map((f) => ({ nome: f.nome_pagamento, valor: f.total_forma_pagamento_calculado })) : [];
+  return { produtos, faturamento: j.valor_total, qtd_pedidos: j.quantidade_pedido, formas };
+}
+
+const num = (v) => {
+  if (v === null || v === undefined || v === '') return null;
+  if (typeof v === 'number') return v;
+  let s = String(v).replace(/[^\d,.-]/g, '');
+  if (s.includes(',')) s = s.replace(/\./g, '').replace(',', '.');
+  const n = parseFloat(s);
+  return Number.isFinite(n) ? n : null;
+};
+
+/**
+ * Acha o buffet por kg e o buffet livre na lista de produtos.
+ * Heurística pelo nome e pela unidade. Se não achar com segurança, devolve
+ * null naquele campo — e o servidor vai recusar "concluir", o que é o certo.
+ */
+function extrairBuffet(produtos) {
+  const nome = (p) => String(p.nome_produto || '').toLowerCase();
+  const unidade = (p) => String(p.flag_tipo_unidade == null ? '' : p.flag_tipo_unidade).toLowerCase();
+
+  const ehPromo = (p) => /promo/.test(nome(p));
+  const kgItens = produtos.filter((p) => /\bkg\b|quilo|por peso|self[- ]?service/.test(nome(p)) || unidade(p) === 'kg' || unidade(p) === '2');
+  // 13/11/2026: o Nomos passou a vender "Buffet Livre Promocao" como produto
+  // separado. O Lucas quer os dois numeros, nao a soma.
+  const livreTodos = produtos.filter((p) => /livre/.test(nome(p)) && !/kg|quilo/.test(nome(p)));
+  const livreItens = livreTodos.filter((p) => !ehPromo(p));
+  const promoItens = livreTodos.filter(ehPromo);
+
+  const soma = (itens, campo) => itens.reduce((t, p) => t + (num(p[campo]) || 0), 0);
+  const kg = kgItens.length ? soma(kgItens, 'quantidade_produto') : null;
+  const valorKg = kgItens.length ? soma(kgItens, 'total_vendido') : null;
+  const livreQtd = livreItens.length ? soma(livreItens, 'quantidade_produto') : null;
+  const livreValor = livreItens.length ? soma(livreItens, 'total_vendido') : null;
+  const promoQtd = promoItens.length ? soma(promoItens, 'quantidade_produto') : null;
+  const promoValor = promoItens.length ? soma(promoItens, 'total_vendido') : null;
+
+  return {
+    kg, valor_kg: valorKg, livre_qtd: livreQtd, livre_valor: livreValor,
+    livre_promo_qtd: promoQtd, livre_promo_valor: promoValor,
+    achou_kg: kgItens.map((p) => p.nome_produto),
+    achou_livre: livreItens.map((p) => p.nome_produto),
+    achou_promo: promoItens.map((p) => p.nome_produto),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// PASSO 4 — PONTOS (CRM > Programa de Fidelidade > olho)
+// ---------------------------------------------------------------------------
+// Colunas conhecidas: Código, Nome, Telefone, Pontos prog. fidelidade.
+// Acho as colunas pelo cabeçalho, com esses índices como reserva.
+// O telefone vai COMO ESTÁ — quem normaliza é o servidor (nono dígito, 0800...).
+async function lerPontos(pageInicial) {
+  let page = pageInicial;
+  await page.goto(NOMOS + '/app/varanda/crm', { waitUntil: 'domcontentloaded', timeout: 60000 });
+  await page.waitForSelector('button.btnCrmRelatorioVisualizar', { timeout: 30000 });
+  // 22/09/2026: o botão existe no HTML antes do JavaScript da página "ligar"
+  // o clique nele. Um humano clica segundos depois; o robô clicava no mesmo
+  // instante e o clique caía no vazio. Espera a rede sossegar + 3s.
+  await page.waitForLoadState('networkidle', { timeout: 30000 }).catch(() => {});
+  await dorme(3000);
+
+  // Raio-X da tela ANTES do clique: como são os botões e a linha do relatório.
+  const raioX = await page.evaluate(() => {
+    const bs = [...document.querySelectorAll('button.btnCrmRelatorioVisualizar')];
+    return bs.slice(0, 6).map((b) => ({
+      attrs: [...b.attributes].map((a) => a.name + '=' + String(a.value).slice(0, 60)).join(' '),
+      linha: (b.closest('tr, li, .row, .card, div') || b.parentElement).innerText.replace(/\s+/g, ' ').slice(0, 120),
+      onclick: (b.getAttribute('onclick') || '').slice(0, 120),
+    }));
+  }).catch(() => []);
+  log('pontos: botões do CRM =', JSON.stringify(raioX));
+
+  // Escuta o que a página pede na rede depois do clique (só URLs, sem corpo).
+  const pedidosRede = [];
+  const ouvinte = (req) => { const u = req.url(); if (/nomosmenu/.test(u) && !/\.(png|jpg|css|js|woff2?|svg|gif)(\?|$)/.test(u)) pedidosRede.push(req.method() + ' ' + u.slice(0, 140)); };
+  page.on('request', ouvinte);
+
+  // Há um botão por relatório; quero o da linha "Programa de Fidelidade".
+  // 22/09/2026 (2a rodada real): o clique não abriu nada NA MESMA ABA -- nem
+  // tabela, nem modal. Ou seja, o relatório abre numa ABA NOVA (window.open) e
+  // o robô ficava olhando a aba velha. Agora o clique é um clique de verdade
+  // do Playwright, e o robô espera até 15s por uma aba nova; se vier, segue
+  // nela; se não vier, continua na atual.
+  // 22/09/2026 (raio-x da 6a rodada): são 5 botões de olho e as linhas NÃO
+  // são <tr>, então o robô caía no 1o botão -- "Clientes novos", que abre um
+  // filtro de data e não uma tabela. O botão certo tem etiqueta própria:
+  //   data-relatorio-index="crmRelatorioClientesProgramaFidelidade"
+  // e não pede filtro nenhum. Mirar nele, e só nele.
+  let botao = page.locator('button.btnCrmRelatorioVisualizar[data-relatorio-index="crmRelatorioClientesProgramaFidelidade"]').first();
+  if (await botao.count() === 0) botao = page.locator('button.btnCrmRelatorioVisualizar[data-relatorio-nome*="idelidade"]').first();
+  if (await botao.count() === 0) throw new Error('Não achei o botão do relatório de fidelidade no CRM (data-relatorio-index=crmRelatorioClientesProgramaFidelidade). Botões vistos: ' + JSON.stringify(raioX));
+  log('pontos: botão escolhido =', await botao.getAttribute('data-relatorio-nome'));
+
+  const [popup] = await Promise.all([
+    page.waitForEvent('popup', { timeout: 15000 }).catch(() => null),
+    botao.click(),
+  ]);
+  let alvo = page;
+  if (popup) {
+    await popup.waitForLoadState('domcontentloaded').catch(() => {});
+    alvo = popup;
+    log('pontos: relatório abriu em aba nova ->', popup.url());
+  } else {
+    log('pontos: nenhuma aba nova; procurando a tabela na aba atual');
+  }
+  // Daqui para baixo, "page" é a aba onde o relatório está.
+  page = alvo;
+
+  // 22/09/2026: na 1a rodada real a tabela não ficou VISÍVEL em 30s e o robô
+  // morreu aqui. O relatório tem ~500 linhas e pode abrir dentro de um modal
+  // ou demorar para carregar. Agora: espera até 90s, aceita a tabela existir
+  // no DOM (não precisa estar visível), espera o DataTables ter LINHAS, e se
+  // ainda assim falhar, descreve a tela no erro para a próxima correção ser
+  // certeira em vez de chute.
+  const descreverTela = () => page.evaluate(() => ({
+    url: location.href,
+    tem_tabela: !!document.querySelector('#tabelaRelatorio'),
+    linhas_tabela: document.querySelectorAll('#tabelaRelatorio tbody tr').length,
+    modais_visiveis: [...document.querySelectorAll('.modal, .jconfirm, .swal2-container')]
+      .filter((m) => m.offsetParent !== null).map((m) => m.innerText.trim().replace(/\s+/g, ' ').slice(0, 160)),
+    tabelas: [...document.querySelectorAll('table[id]')].map((t) => t.id + '(' + t.querySelectorAll('tbody tr').length + ')').slice(0, 10),
+    texto: document.body.innerText.replace(/\s+/g, ' ').slice(0, 300),
+  })).catch(() => ({}));
+
+  try {
+    await page.waitForSelector('#tabelaRelatorio', { state: 'attached', timeout: 90000 });
+    await page.waitForFunction(() => window.jQuery && jQuery.fn.DataTable
+      && jQuery.fn.DataTable.isDataTable('#tabelaRelatorio')
+      && jQuery('#tabelaRelatorio').DataTable().rows().count() > 0, null, { timeout: 90000 });
+  } catch (e) {
+    const tela = await descreverTela();
+    throw new Error('Relatório de fidelidade não carregou. Tela: ' + JSON.stringify(tela)
+      + ' | botões: ' + JSON.stringify(raioX) + ' | rede após clique: ' + JSON.stringify(pedidosRede.slice(0, 12)));
+  }
+  await dorme(1500);
+
+  const clientes = await page.evaluate(() => {
+    const dt = jQuery('#tabelaRelatorio').DataTable();
+    dt.page.len(-1).draw();
+    const cab = [...document.querySelectorAll('#tabelaRelatorio thead th')].map((th) => th.innerText.trim().toLowerCase());
+    let iTel = cab.findIndex((t) => /telefone|celular|whats/.test(t));
+    let iPts = cab.findIndex((t) => /ponto|saldo/.test(t));
+    if (iTel < 0) iTel = 2;
+    if (iPts < 0) iPts = 3;
+    const dados = dt.rows().data().toArray();
+    const txt = (v) => String(v == null ? '' : v).replace(/<[^>]*>/g, '').replace(/\s+/g, ' ').trim();
+    const out = [];
+    for (const linha of dados) {
+      const cel = Array.isArray(linha) ? linha : Object.values(linha);
+      const telefone = txt(cel[iTel]);
+      const saldo = parseInt(txt(cel[iPts]).replace(/\D/g, ''), 10);
+      if (telefone && Number.isFinite(saldo)) out.push({ telefone, saldo });
+    }
+    return { total_linhas: dados.length, cabecalho: cab, clientes: out };
+  });
+
+  log('pontos: linhas=' + clientes.total_linhas + ' aproveitáveis=' + clientes.clientes.length
+    + ' cabeçalho=' + JSON.stringify(clientes.cabecalho));
+  if (!clientes.clientes.length) throw new Error('Relatório de fidelidade veio sem linhas aproveitáveis.');
+  return clientes.clientes;
+}
+
+// ---------------------------------------------------------------------------
+// PRINCIPAL
+// ---------------------------------------------------------------------------
+(async function principal() {
+  const inicio = Date.now();
+  const hoje = hojeISO();
+  const detalhe = { dia: hoje, passo: 'inicio' };
+  let execucaoId = null;
+  let browser = null;
+
+  const falhar = async (passo, e) => {
+    const msg = semSegredo(e && e.message ? e.message : e);
+    log('FALHOU no passo', passo, '->', msg);
+    await telegram('VARANDA - ROBO DE COLETA FALHOU (' + hoje + ')\nPasso: ' + passo + '\nErro: ' + msg
+      + '\n\nOs pontos das 15h NAO vao sair hoje (a trava de coleta bloqueia). '
+      + (passo === 'login'
+        ? 'Conferir usuario/senha do Nomos no cofre do GitHub (Settings > Secrets).'
+        : 'Ver o log da execucao no GitHub Actions.'));
+    if (execucaoId) {
+      // O erro inteiro vai em detalhe.erro (até 4000 chars): é ali que fica o
+      // raio-x da tela, e é ele que permite consertar sem chute.
+      detalhe.erro = msg.slice(0, 4000);
+      await coleta({ acao: 'fechar_log', execucao_id: execucaoId, sucesso: false, mensagem: 'robô falhou em ' + passo + ': ' + msg.slice(0, 300), detalhe }).catch(() => {});
+    }
+    if (browser) await browser.close().catch(() => {});
+    process.exit(1);
+  };
+
+  if (!USUARIO || !SENHA || !TOKEN) {
+    return falhar('config', new Error('Faltam variáveis: ' + [!USUARIO && 'NOMOS_USUARIO', !SENHA && 'NOMOS_SENHA', !TOKEN && 'VARANDA_TOKEN'].filter(Boolean).join(', ')));
+  }
+
+  if (MODO_ROBO !== 'estrutura' && !SO_TESTAR_LOGIN && MODO_ROBO !== 'forcar') {
+    const est = await coleta({ acao: 'estado' }).catch(() => null);
+    const e = est && est.ok ? est.corpo : null;
+    if (e && e.completa && e.relatorio_enviado && e.pagamentos_gravados) {
+      log('dia ' + hoje + ' já resolvido (coleta completa, relatório enviado, pagamentos gravados). Nada a fazer.');
+      process.exit(0);
+    }
+  }
+
+  try {
+    browser = await chromium.launch({ headless: true });
+    const contexto = await browser.newContext({
+      locale: 'pt-BR', timezoneId: 'America/Sao_Paulo',
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0 Safari/537.36',
+      viewport: { width: 1366, height: 900 },
+    });
+    const page = await contexto.newPage();
+    page.setDefaultTimeout(45000);
+
+    // 0 — login
+    detalhe.passo = 'login';
+    let cookie = '';
+    try { cookie = await login(page); } catch (e) {
+      const ini = await coleta({ acao: 'inicio' }).catch(() => null);
+      execucaoId = ini && ini.ok && ini.corpo ? ini.corpo.execucao_id : null;
+      return falhar('login', e);
+    }
+    if (MODO_ROBO === 'estrutura') {
+      const mapa = await descobrirPagamentos(page).catch((e) => ({ erro: semSegredo(e && e.message) }));
+      log('estrutura:', JSON.stringify(mapa).slice(0, 3000));
+      const r = await coleta({ acao: 'diagnostico', rotina: 'robo-estrutura-pagamentos', detalhe: mapa });
+      log('diagnostico gravado:', r.status);
+      await browser.close(); return;
+    }
+    if (SO_TESTAR_LOGIN) {
+      log('SO_TESTAR_LOGIN=1: login funcionou, parando aqui sem coletar nada.');
+      // Deixa um registro em execucoes_log (só isso) para quem confere pelo banco.
+      const ini = await coleta({ acao: 'inicio' });
+      const id = ini.ok && ini.corpo && ini.corpo.execucao_id;
+      if (id) await coleta({ acao: 'fechar_log', execucao_id: id, sucesso: true, mensagem: 'robô: TESTE DE LOGIN OK (nada coletado)' });
+      await telegram('VARANDA - teste do robo: LOGIN NO NOMOS FUNCIONOU (' + hoje + '). Nada foi coletado.');
+      await browser.close(); return;
+    }
+
+    // 1 — inicio
+    detalhe.passo = 'inicio';
+    const ini = await coleta({ acao: 'inicio' });
+    if (!ini.ok) return falhar('inicio', new Error('/api/coleta inicio HTTP ' + ini.status + ' ' + JSON.stringify(ini.corpo).slice(0, 200)));
+    execucaoId = ini.corpo && ini.corpo.execucao_id;
+    log('execucao_id', execucaoId);
+
+    // 2 — pedidos
+    detalhe.passo = 'pedidos';
+    let ped;
+    try { ped = await lerPedidos(page); } catch (e) { return falhar('pedidos', e); }
+    const imp = await importarPedidos(ped.pedidos).catch((e) => { throw e; });
+    detalhe.pedidos_lidos = ped.pedidos.length; detalhe.pedidos_novos = imp.novos; detalhe.problemas_importar = imp.problemas.length;
+    if (!ped.temHoje) return falhar('pedidos', new Error('Nenhum pedido com a data de hoje nos ' + ped.pedidos.length + ' lidos. Ou o caixa não lançou nada, ou o filtro de data quebrou.'));
+    const rp = await coleta({ acao: 'pedidos', lidos: ped.pedidos.length, tem_pedidos_de_hoje: true });
+    if (!rp.ok) return falhar('pedidos', new Error(JSON.stringify(rp.corpo).slice(0, 300)));
+
+    // 3 — kg e buffet
+    detalhe.passo = 'buffet';
+    const prod = await lerProdutosDeHoje(page);
+    let buffetOk = false, buffetMotivo = 'listarJson não respondeu';
+    if (prod) {
+      const b = extrairBuffet(prod.produtos);
+      detalhe.buffet = { kg: b.kg, valor_kg: b.valor_kg, livre_qtd: b.livre_qtd, livre_valor: b.livre_valor, achou_kg: b.achou_kg, achou_livre: b.achou_livre };
+      if (b.kg && b.valor_kg) {
+        const corpo = { acao: 'buffet', kg: b.kg, valor_kg: b.valor_kg };
+        if (b.livre_qtd && b.livre_valor) { corpo.livre_qtd = b.livre_qtd; corpo.livre_valor = b.livre_valor; }
+        if (b.livre_promo_qtd || b.livre_promo_valor) { corpo.livre_promo_qtd = b.livre_promo_qtd; corpo.livre_promo_valor = b.livre_promo_valor; }
+        const rb = await coleta(corpo);
+        buffetOk = rb.ok;
+        buffetMotivo = rb.ok ? 'ok' : ('servidor recusou: ' + JSON.stringify(rb.corpo && (rb.corpo.problemas || rb.corpo.erro)).slice(0, 300));
+      } else {
+        buffetMotivo = 'não achei o produto por kg entre: ' + prod.produtos.map((p) => p.nome_produto).join(' | ').slice(0, 400);
+      }
+    }
+    detalhe.buffet_ok = buffetOk; detalhe.buffet_motivo = buffetMotivo;
+
+    // 12/11/2026 - o kg sumiu do relatorio desde 04/11 e NINGUEM percebeu,
+    // porque a coleta continuava se declarando "completa" sem o buffet.
+    // Falha muda = oito dias de relatorio sem kg. A partir de hoje, se o
+    // buffet nao entrar, o Telegram avisa na hora E diz os nomes que o Nomos
+    // devolveu, que e o unico jeito de consertar no mesmo dia.
+    if (!buffetOk) {
+      await telegram('AVISO VARANDA - o kg/buffet NAO entrou na coleta de hoje.' + '\n' + '\n' + buffetMotivo).catch(function () {});
+    }
+
+    // 3b — formas de pagamento (20/10/2026). Nunca derruba a coleta.
+    if (prod && prod.formas && prod.formas.length) {
+      const rpg = await coleta({ acao: 'pagamentos', itens: prod.formas, valor_total: prod.faturamento }).catch(() => null);
+      detalhe.pagamentos = rpg && rpg.corpo ? rpg.corpo.formas : null;
+      if (rpg && rpg.corpo && rpg.corpo.sem_regra && rpg.corpo.sem_regra.length) detalhe.pagamentos_sem_regra = rpg.corpo.sem_regra;
+      log('pagamentos:', JSON.stringify(detalhe.pagamentos));
+    }
+    log('buffet:', buffetOk ? 'ok' : buffetMotivo);
+
+    // 4 — pontos
+    detalhe.passo = 'pontos';
+    let clientes;
+    try { clientes = await lerPontos(page); } catch (e) { return falhar('pontos', e); }
+    const rpt = await coleta({ acao: 'pontos', clientes });
+    if (!rpt.ok) return falhar('pontos', new Error(JSON.stringify(rpt.corpo).slice(0, 300)));
+    detalhe.pontos_gravados = rpt.corpo.gravados; detalhe.pontos_recusados = rpt.corpo.recusados && rpt.corpo.recusados.length;
+    log('pontos:', JSON.stringify({ gravados: rpt.corpo.gravados, recusados: detalhe.pontos_recusados }));
+
+    // 5 — concluir
+    detalhe.passo = 'concluir';
+    const rc = await coleta({ acao: 'concluir' });
+    detalhe.completa = !!(rc.ok && rc.corpo && rc.corpo.completa);
+    detalhe.pode_enviar = !!(rc.ok && rc.corpo && rc.corpo.pode_enviar);
+    detalhe.faltando = rc.ok ? null : (rc.corpo && rc.corpo.faltando);
+
+    // 6 — cookie para o servidor (bônus, nunca crítico)
+    detalhe.passo = 'sessao';
+    if (cookie) {
+      const rs = await backend('/api/nomos-sessao', { cookie }).catch(() => null);
+      log('nomos-sessao:', rs ? rs.status : 'falhou', rs && rs.corpo && rs.corpo.teste_imediato);
+    }
+
+    // 6b — 24/09/2026: se ja passou das 15h de Brasilia, o cron da rotina ja
+    // rodou e se bloqueou (a coleta nao existia). O GitHub atrasou 3h21 em
+    // 24/09. Entao o robo chama a rotina ele mesmo. E seguro: os pontos tem
+    // chave de idempotencia e a rotina recusa rodar duas vezes no mesmo dia.
+    detalhe.passo = 'rotina';
+    if (detalhe.completa && agoraBR().getUTCHours() >= 15) {
+      const rr = await backend('/api/rotina-diaria', null, 'GET').catch(() => null);
+      detalhe.rotina_chamada = rr ? { status: rr.status, ja_enviado_hoje: rr.corpo && rr.corpo.ja_enviado_hoje,
+        pontos: rr.corpo && rr.corpo.pontos && rr.corpo.pontos.enviados, telegram: rr.corpo && rr.corpo.telegram } : 'falhou';
+      log('rotina-diaria chamada pelo robô:', JSON.stringify(detalhe.rotina_chamada));
+    }
+
+    // 7 — fechar e avisar
+    detalhe.passo = 'fim';
+    detalhe.segundos = Math.round((Date.now() - inicio) / 1000);
+    await coleta({ acao: 'fechar_log', execucao_id: execucaoId, sucesso: detalhe.completa, detalhe, mensagem: detalhe.completa ? 'robô: coleta completa' : 'robô: coleta parcial' });
+
+    const linha = 'VARANDA - COLETA 14h ' + (detalhe.completa ? 'OK' : 'PARCIAL') + ' (' + hoje + ')\n'
+      + 'Pedidos lidos: ' + detalhe.pedidos_lidos + ' (novos: ' + detalhe.pedidos_novos + ')\n'
+      + 'Saldos de pontos gravados: ' + detalhe.pontos_gravados + '\n'
+      + 'Kg/buffet: ' + (buffetOk ? ('kg ' + detalhe.buffet.kg + ' · livre ' + (detalhe.buffet.livre_qtd || 0)) : ('NAO -> ' + buffetMotivo)) + '\n'
+      + (detalhe.completa
+        ? (detalhe.rotina_chamada ? ('Rotina dos pontos chamada agora: ' + JSON.stringify(detalhe.rotina_chamada)) : 'Pontos e fechamento saem as 15h sozinhos.')
+        : 'Coleta NAO marcada como completa (faltou: ' + JSON.stringify(detalhe.faltando) + '). As 15h NAO vai enviar.');
+    // 20/10/2026: sucesso não vai mais para o Telegram (eram 3 mensagens por dia,
+    // uma por horário do robô). O relatório da rotina já diz que deu certo; se não
+    // fechar, a checagem das 20h30 avisa.
+    log(linha);
+
+    await browser.close();
+    process.exit(detalhe.completa ? 0 : 2);
+  } catch (e) {
+    return falhar(detalhe.passo, e);
+  }
+})();
