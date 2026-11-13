@@ -349,6 +349,13 @@ async function lerProdutosDeHoje(page) {
   // procuramos a lista de produtos em QUALQUER chave da resposta, pelo
   // formato dos itens (tem nome de produto e tem quantidade).
   log('chaves do listarJson:', JSON.stringify(Object.keys(j || {})));
+  // 13/11/2026 - raio-x das chaves que podem ter o kg. So agregados do dia
+  // (nada de cliente). E assim que a gente descobre o formato novo sem chutar.
+  for (const chaveRx of ['itens_vendidos', 'pedidos_tipo_quantidade', 'tipo_pedidos']) {
+    const vrx = j ? j[chaveRx] : null;
+    log('raio-x ' + chaveRx + ':', 'tipo=' + (Array.isArray(vrx) ? 'array' : typeof vrx),
+      'tamanho=' + (Array.isArray(vrx) ? vrx.length : ''), JSON.stringify(vrx).slice(0, 700));
+  }
   function pareceProduto(v) {
     if (!Array.isArray(v) || !v.length) return false;
     const p = v[0];
@@ -359,7 +366,7 @@ async function lerProdutosDeHoje(page) {
   let produtos = Array.isArray(j.cardapio_produto_quantidade) ? j.cardapio_produto_quantidade : [];
   if (!produtos.length) {
     for (const chave of Object.keys(j || {})) {
-      if (chave === 'cardapio_produto_quantidade') continue;
+      if (chave === 'cardapio_produto_quantidade' || chave === 'formas_pagamento') continue;
       if (pareceProduto(j[chave])) {
         produtos = j[chave];
         log('produtos achados em outra chave:', chave, JSON.stringify(Object.keys(produtos[0])));
