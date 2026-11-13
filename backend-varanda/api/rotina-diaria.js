@@ -448,7 +448,7 @@ module.exports = async function handler(req, res) {
   }
 
   // kg e buffet livre: só existem se o PC gravou. Nunca inventar.
-  const buf = await sb('/buffet_dia?select=kg,valor_kg,livre_qtd,livre_valor&dia=eq.' + hoje);
+  const buf = await sb('/buffet_dia?select=kg,valor_kg,livre_qtd,livre_valor,livre_promo_qtd,livre_promo_valor&dia=eq.' + hoje);
   const b = (buf.ok && Array.isArray(buf.corpo) && buf.corpo[0]) ? buf.corpo[0] : null;
 
   const NC = '(não confirmado)';
@@ -506,6 +506,7 @@ module.exports = async function handler(req, res) {
     + '\n⚖️ *Buffet*\n'
     + '• Por kg: ' + (b && b.kg ? dinheiro(b.kg) + ' kg · R$ ' + dinheiro(b.valor_kg) : NC) + '\n'
     + '• Livre: ' + (b && b.livre_qtd ? b.livre_qtd + ' pessoas · R$ ' + dinheiro(b.livre_valor) : (b ? '0' : NC)) + '\n'
+    + '• Livre promoção: ' + (b && b.livre_promo_qtd ? b.livre_promo_qtd + ' pessoas · R$ ' + dinheiro(b.livre_promo_valor) : (b ? '0' : NC)) + '\n'
     + '\n' + blocoClientes + '\n'
     + '\n⭐ *Pontos enviados aos clientes:* ' + pontosEnv;
 
