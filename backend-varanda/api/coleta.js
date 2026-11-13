@@ -245,6 +245,8 @@ module.exports = async function handler(req, res) {
   if (acao === 'buffet') {
     const kg = num(c.kg), valorKg = num(c.valor_kg);
     const qtd = num(c.livre_qtd), valorLivre = num(c.livre_valor);
+    // 13/11/2026: o Nomos separou "Buffet Livre Promocao" do livre normal.
+    const promoQtd = num(c.livre_promo_qtd), promoValor = num(c.livre_promo_valor);
     const problemas = [];
     // AVISOS nao bloqueiam a coleta (05/10/2026). Buffet livre fora do preco
     // padrao e NORMAL: promocao, meia-entrada de crianca, cortesia. Em 05/10
@@ -297,6 +299,7 @@ module.exports = async function handler(req, res) {
       },
       body: JSON.stringify({
         dia, kg, valor_kg: valorKg, livre_qtd: qtd, livre_valor: valorLivre,
+        livre_promo_qtd: promoQtd, livre_promo_valor: promoValor,
         gravado_em: new Date().toISOString(),
       }),
     });
