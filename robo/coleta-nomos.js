@@ -154,8 +154,21 @@ async function login(page) {
     throw new Error('LOGIN FALHOU: depois de enviar usuário e senha o Nomos continuou na tela de login. '
       + 'Ou a senha mudou, ou o Nomos bloqueou. Ninguém digitou nada errado por aqui — conferir NOMOS_USUARIO / NOMOS_SENHA no cofre.');
   }
-  const cookie = await page.evaluate(() => document.cookie).catch(() => '');
-  log('login ok. cookies na página:', (cookie.match(/=/g) || []).length);
+  // 18/11/2026 — document.cookie NAO enxerga cookie HttpOnly, e a sessao do
+  // Nomos (sisfood_session) e HttpOnly. Por isso o cookie que mandavamos para
+  // o servidor voltava sempre "expirado": ia incompleto, sem a sessao de fato.
+  // context().cookies() enxerga todos. E isso que abre o caminho do servidor
+  // ler o Nomos sozinho, sem navegador e sem depender da hora do GitHub.
+  let cookie = "";
+  try {
+    const todos = await page.context().cookies();
+    cookie = todos
+      .filter((c) => String(c.domain || "").indexOf("nomosmenu") >= 0)
+      .map((c) => c.name + "=" + c.value)
+      .join("; ");
+  } catch (e) { cookie = ""; }
+  if (!cookie) cookie = await page.evaluate(() => document.cookie).catch(() => "");
+  log("login ok. cookies capturados:", (cookie.match(/=/g) || []).length);
   return cookie;
 }
 
